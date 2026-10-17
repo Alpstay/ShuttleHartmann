@@ -2,13 +2,17 @@
 
 Servizio navetta dello Chalet Hotel Hartmann verso gli impianti di risalita, su tre livelli:
 
+Tre indirizzi distinti (ognuno con il suo titolo, comodo come icona sulla schermata Home del telefono):
+
 | Area | Indirizzo | Chi | Accesso |
 | --- | --- | --- | --- |
-| Ospite | `#/ospite` (o QR della camera `#/ospite/105`) | ospiti in casa | numero di camera |
-| Reception | `#/staff` | banco reception | PIN reception (4 cifre) |
-| Autista | `#/staff` | telefono sul mezzo | PIN autista (4 cifre) |
+| Ospite | `…/ShuttleHartmann/ospite` (o QR della camera `#/ospite/105`) | ospiti in casa | numero di camera |
+| Reception | `…/ShuttleHartmann/reception` | banco reception | solo PIN reception |
+| Autista | `…/ShuttleHartmann/autista` | telefono sul mezzo | solo PIN autista |
 
-Il PIN decide l'area: lo stesso indirizzo `#/staff` apre la reception o l'autista.
+Gli indirizzi brevi sono cartelle con una pagina che rimanda a `#/ospite`, `#/reception` e `#/autista`.
+Su un indirizzo dello staff il PIN dell'altra area non apre nulla: la pagina indica l'indirizzo giusto.
+Resta anche `#/staff`, dove il PIN decide l'area.
 
 Pagina: `https://alpstay.github.io/ShuttleHartmann/` (GitHub Pages, file unico `index.html`).
 
@@ -70,11 +74,12 @@ GitHub Pages  index.html ◀── reception (password presenze, rilettura ogni 
    `select public.shuttle_admin_set_pin('autista', '<PIN autista>');`.
    In *Authentication → Sign In / Providers* attiva **Allow anonymous sign-ins**.
 2. **Repository** `Alpstay/ShuttleHartmann` (pubblico, come WelcomeHartmann) con GitHub Pages su `main`, radice.
-3. **Build**: copia `.env.example` in `.env`, inserisci URL e chiave *anon* di Supabase, poi
-   `npm install && npm run build` → `index.html`. Pubblica `index.html` e `tools/`.
+3. **Build**: copia `.env.example` in `.env`, inserisci URL e Publishable key di Supabase, poi
+   `npm install && npm run build` → `index.html`. Pubblica `index.html`, le cartelle `ospite/`, `reception/`,
+   `autista/` e `tools/`.
 4. **Attività pianificata** delle presenze: testo pronto in `tools/ATTIVITA.md` (ogni ora alle :50, 6:50–18:50).
-5. **Primo giorno**: la reception entra da `#/staff` con il suo PIN e sblocca le presenze con la password
-   (una volta per dispositivo): le camere in casa si attivano da sole. L'autista entra da `#/staff` con il
+5. **Primo giorno**: la reception entra da `…/reception` con il suo PIN e sblocca le presenze con la password
+   (una volta per dispositivo): le camere in casa si attivano da sole. L'autista entra da `…/autista` con il
    suo PIN sul telefono del mezzo e attiva suono e schermo acceso.
 
 ## Programma Impostazioni (reception)

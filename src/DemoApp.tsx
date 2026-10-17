@@ -93,7 +93,7 @@ export function DemoApp({ hub, clock, presence }: { hub: DemoHub; clock: OffsetC
                 {p.id === 'ospite' ? (
                   <GuestView key={`g${resetKey}`} sessionKey={`shuttle-demo-guest-${resetKey}`} autoLogin={{ room: DEMO_GUEST_ROOM }} />
                 ) : (
-                  <StaffGate key={`${p.id}${resetKey}`} title={p.id === 'reception' ? 'Reception' : 'Autista'} />
+                  <StaffGate key={`${p.id}${resetKey}`} area={p.id === 'reception' ? 'reception' : 'autista'} />
                 )}
               </AppProvider>
             </div>
