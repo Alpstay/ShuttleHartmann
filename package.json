@@ -13,7 +13,7 @@
     "test:sql": "node tests/sql/schema.test.mjs"
   },
   "dependencies": {
-    "@supabase/supabase-js": "2.49.8",
+    "@supabase/supabase-js": "2.117.3",
     "lucide-react": "0.511.0",
     "qrcode-generator": "1.4.4",
     "react": "18.3.1",
