@@ -1,0 +1,388 @@
+import {
+  addDays,
+  fromMinutes,
+  isValidHhMm,
+  isValidIsoDate,
+  romeDate,
+  romeMinutesOfDay,
+  toMinutes,
+} from './time';
+import type {
+  Actor,
+  ChargeDecision,
+  Direction,
+  DriverMessageKind,
+  HhMm,
+  IsoDate,
+  Ride,
+  RideInput,
+  RideStatus,
+  ShuttleSettings,
+  ShuttleStay,
+} from './types';
+import { ShuttleError } from './types';
+import { HARTMANN_ROOMS } from '../config';
+
+export const DEFAULT_SETTINGS: ShuttleSettings = {
+  rooms: [...HARTMANN_ROOMS],
+  guestAccess: 'camere_occupate',
+  destinations: [
+    { id: 'seceda', name: 'Seceda', place: 'Ortisei', active: true },
+    { id: 'alpe-di-siusi', name: 'Alpe di Siusi', place: 'Ortisei', active: true },
+    { id: 'resciesa', name: 'Resciesa', place: 'Ortisei', active: true },
+    { id: 'col-raiser', name: 'Col Raiser', place: 'S. Cristina', active: true },
+    { id: 'monte-pana', name: 'Monte Pana', place: 'S. Cristina', active: true },
+  ],
+  seats: 8,
+  waitMinutes: 5,
+  serviceStart: '08:00',
+  serviceEnd: '17:30',
+  minLeadMinutes: 15,
+  receptionPhone: '',
+  updatedAt: '1970-01-01T00:00:00.000Z',
+};
+
+/** Passo dell'orario selezionabile. */
+export const SLOT_STEP_MINUTES = 5;
+
+/** Stati in cui la corsa è ancora da svolgere. */
+export const OPEN_STATUSES: readonly RideStatus[] = ['richiesta', 'confermata', 'sul_posto'];
+
+export function isOpen(status: RideStatus): boolean {
+  return OPEN_STATUSES.includes(status);
+}
+
+// ---------------------------------------------------------------------------
+// Validazione richiesta
+// ---------------------------------------------------------------------------
+
+export type RideInputProblem =
+  | 'data_non_valida'
+  | 'data_fuori_soggiorno'
+  | 'data_troppo_lontana'
+  | 'orario_non_valido'
+  | 'fuori_orario_servizio'
+  | 'troppo_presto'
+  | 'persone_non_valide'
+  | 'destinazione_non_valida'
+  | 'condizioni_non_accettate';
+
+export interface ValidationContext {
+  settings: ShuttleSettings;
+  nowMs: number;
+  /** Chi inserisce: l'ospite deve accettare le condizioni e rispettare l'anticipo minimo. */
+  actor: 'ospite' | 'reception';
+  /** Soggiorno collegato, per non accettare corse dopo la partenza. */
+  stay?: Pick<ShuttleStay, 'validFrom' | 'validUntil'> | null;
+}
+
+export function validateRideInput(input: RideInput, ctx: ValidationContext): RideInputProblem[] {
+  const problems: RideInputProblem[] = [];
+  const today = romeDate(ctx.nowMs);
+  const { settings } = ctx;
+
+  if (!isValidIsoDate(input.serviceDate) || input.serviceDate < today) {
+    problems.push('data_non_valida');
+  } else if (ctx.actor === 'ospite' && input.serviceDate > addDays(today, 1)) {
+    problems.push('data_troppo_lontana');
+  }
+  if (
+    ctx.stay &&
+    isValidIsoDate(input.serviceDate) &&
+    (input.serviceDate > ctx.stay.validUntil || input.serviceDate < ctx.stay.validFrom)
+  ) {
+    problems.push('data_fuori_soggiorno');
+  }
+
+  if (!isValidHhMm(input.time)) {
+    problems.push('orario_non_valido');
+  } else {
+    const t = toMinutes(input.time);
+    if (t < toMinutes(settings.serviceStart) || t > toMinutes(settings.serviceEnd)) {
+      problems.push('fuori_orario_servizio');
+    }
+    if (input.serviceDate === today) {
+      const lead = ctx.actor === 'ospite' ? settings.minLeadMinutes : 0;
+      if (t < romeMinutesOfDay(ctx.nowMs) + lead) problems.push('troppo_presto');
+    }
+  }
+
+  if (!Number.isInteger(input.persons) || input.persons < 1 || input.persons > settings.seats) {
+    problems.push('persone_non_valide');
+  }
+
+  const dest = settings.destinations.find((d) => d.id === input.destinationId);
+  if (!dest || !dest.active) problems.push('destinazione_non_valida');
+
+  if (ctx.actor === 'ospite' && !input.conditionsAccepted) problems.push('condizioni_non_accettate');
+
+  return problems;
+}
+
+/** Primo orario prenotabile per una data, arrotondato al passo di 5 minuti. */
+export function earliestSlot(settings: ShuttleSettings, nowMs: number, date: IsoDate, actor: Actor): HhMm | null {
+  const start = toMinutes(settings.serviceStart);
+  const end = toMinutes(settings.serviceEnd);
+  let first = start;
+  if (date === romeDate(nowMs)) {
+    const lead = actor === 'ospite' ? settings.minLeadMinutes : 0;
+    const min = romeMinutesOfDay(nowMs) + lead;
+    first = Math.max(start, Math.ceil(min / SLOT_STEP_MINUTES) * SLOT_STEP_MINUTES);
+  }
+  return first > end ? null : fromMinutes(first);
+}
+
+/** Orario proposto di default: 09:00 per l'andata, 16:00 per il ritorno, o il primo disponibile. */
+export function suggestedTime(
+  settings: ShuttleSettings,
+  nowMs: number,
+  date: IsoDate,
+  direction: Direction,
+  actor: Actor,
+): HhMm | null {
+  const earliest = earliestSlot(settings, nowMs, date, actor);
+  if (!earliest) return null;
+  const preferred = direction === 'andata' ? '09:00' : '16:00';
+  const t = Math.max(toMinutes(preferred), toMinutes(earliest));
+  return t > toMinutes(settings.serviceEnd) ? earliest : fromMinutes(t);
+}
+
+/** Sposta un orario di `delta` minuti restando dentro la finestra prenotabile. */
+export function shiftTime(
+  time: HhMm,
+  delta: number,
+  settings: ShuttleSettings,
+  nowMs: number,
+  date: IsoDate,
+  actor: Actor,
+): HhMm {
+  const earliest = earliestSlot(settings, nowMs, date, actor);
+  const lo = earliest ? toMinutes(earliest) : toMinutes(settings.serviceStart);
+  const hi = toMinutes(settings.serviceEnd);
+  const next = Math.min(hi, Math.max(lo, toMinutes(time) + delta));
+  return fromMinutes(next);
+}
+
+// ---------------------------------------------------------------------------
+// Soggiorni, camere e PIN dello staff
+// ---------------------------------------------------------------------------
+
+export function isStayValid(stay: ShuttleStay, nowMs: number): boolean {
+  if (stay.revokedAt) return false;
+  const today = romeDate(nowMs);
+  return today >= stay.validFrom && today <= stay.validUntil;
+}
+
+/** Il numero di camera digitato dall'ospite, ripulito (spazi, zeri iniziali non significativi esclusi). */
+export function normalizeRoom(input: string): string {
+  return input.replace(/\s+/g, '').trim();
+}
+
+/** PIN dello staff: 4 cifre. Reception e autista devono avere PIN diversi (il PIN decide il ruolo). */
+export function staffPinProblem(pin: string, otherRolePin: string | null): string | null {
+  if (!/^\d{4}$/.test(pin)) return 'Il PIN deve avere 4 cifre.';
+  if (otherRolePin !== null && pin === otherRolePin) return 'Reception e autista devono avere PIN diversi.';
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// Transizioni di stato
+// ---------------------------------------------------------------------------
+
+export function applyDriverMessage(ride: Ride, kind: DriverMessageKind, nowIso: string): Ride {
+  if (!isOpen(ride.status)) {
+    throw new ShuttleError('stato_non_valido', 'La corsa è già chiusa.');
+  }
+  const arrivedAt = ride.arrivedAt ?? (kind === 'arrivato' ? nowIso : null);
+  return {
+    ...ride,
+    readAt: ride.readAt ?? nowIso,
+    lastMessage: kind,
+    lastMessageAt: nowIso,
+    arrivedAt,
+    status: arrivedAt ? 'sul_posto' : 'confermata',
+    updatedAt: nowIso,
+  };
+}
+
+export function applyDone(ride: Ride, nowIso: string): Ride {
+  if (ride.status !== 'confermata' && ride.status !== 'sul_posto') {
+    throw new ShuttleError('stato_non_valido', 'Conferma prima la lettura con un messaggio all’ospite.');
+  }
+  return { ...ride, status: 'completata', completedAt: nowIso, updatedAt: nowIso };
+}
+
+export interface WaitState {
+  deadlineMs: number;
+  remainingMs: number;
+  expired: boolean;
+}
+
+export function waitState(ride: Pick<Ride, 'arrivedAt'>, settings: Pick<ShuttleSettings, 'waitMinutes'>, nowMs: number): WaitState | null {
+  if (!ride.arrivedAt) return null;
+  const deadlineMs = Date.parse(ride.arrivedAt) + settings.waitMinutes * 60000;
+  const remainingMs = Math.max(0, deadlineMs - nowMs);
+  return { deadlineMs, remainingMs, expired: remainingMs === 0 };
+}
+
+/** Minuti prima dell'orario in cui l'autista riceve l'avviso di partire per il pick-up. */
+export const DEPART_ALERT_MINUTES = 7;
+/** Oltre questo ritardo la corsa non lampeggia più: è una corsa rimasta aperta che la reception deve chiudere. */
+export const DEPART_ALERT_MAX_LATE_MINUTES = 30;
+
+export interface DepartState {
+  /** Minuti all'orario della corsa: negativi se l'orario è già passato. */
+  minutesLeft: number;
+}
+
+/**
+ * Avviso di partenza per l'autista: da 7 minuti prima dell'orario finché non avvisa l'ospite di essere
+ * arrivato (o la corsa si chiude), al massimo per 30 minuti dopo l'orario. Solo corse di oggi ancora da fare.
+ */
+export function departState(
+  ride: Pick<Ride, 'status' | 'serviceDate' | 'time'>,
+  nowMs: number,
+  leadMinutes: number = DEPART_ALERT_MINUTES,
+): DepartState | null {
+  if (ride.status !== 'richiesta' && ride.status !== 'confermata') return null;
+  if (ride.serviceDate !== romeDate(nowMs)) return null;
+  const minutesLeft = toMinutes(ride.time) - romeMinutesOfDay(nowMs);
+  return minutesLeft <= leadMinutes && minutesLeft >= -DEPART_ALERT_MAX_LATE_MINUTES ? { minutesLeft } : null;
+}
+
+/** Dove l'autista carica l'ospite: in hotel all'andata, all'impianto al ritorno. */
+export function pickupPlace(ride: Pick<Ride, 'direction' | 'destinationName'>): string {
+  return ride.direction === 'andata' ? 'Hotel' : ride.destinationName;
+}
+
+/** Testo breve del tempo che manca al pick-up: «fra 5 min», «adesso», «3 min di ritardo». */
+export function departLabel(minutesLeft: number): string {
+  if (minutesLeft > 0) return `fra ${minutesLeft} min`;
+  if (minutesLeft === 0) return 'adesso';
+  return `${-minutesLeft} min di ritardo`;
+}
+
+export function applyNoShow(ride: Ride, settings: ShuttleSettings, nowMs: number): Ride {
+  if (ride.status !== 'sul_posto') {
+    throw new ShuttleError('stato_non_valido', 'Prima avvisa l’ospite che sei arrivato.');
+  }
+  const wait = waitState(ride, settings, nowMs);
+  if (!wait || !wait.expired) {
+    throw new ShuttleError('attesa_in_corso', `L’attesa di ${settings.waitMinutes} minuti non è ancora finita.`);
+  }
+  const nowIso = new Date(nowMs).toISOString();
+  return { ...ride, status: 'no_show', noShowAt: nowIso, chargeDecision: 'da_valutare', updatedAt: nowIso };
+}
+
+/** L'ospite può cancellare finché l'autista non lo ha avvisato di essere arrivato. */
+export function canGuestCancel(ride: Pick<Ride, 'status'>): boolean {
+  return ride.status === 'richiesta' || ride.status === 'confermata';
+}
+
+export function applyCancel(ride: Ride, actor: Actor, nowIso: string): Ride {
+  if (actor === 'ospite' && !canGuestCancel(ride)) {
+    throw new ShuttleError('stato_non_valido', 'L’autista è già arrivato: contatta la reception.');
+  }
+  if (!isOpen(ride.status)) {
+    throw new ShuttleError('stato_non_valido', 'La corsa è già chiusa.');
+  }
+  return { ...ride, status: 'annullata', cancelledAt: nowIso, cancelledBy: actor, updatedAt: nowIso };
+}
+
+export function applyCharge(ride: Ride, decision: ChargeDecision, nowIso: string): Ride {
+  if (ride.status !== 'no_show') {
+    throw new ShuttleError('stato_non_valido', 'L’addebito si decide solo per le corse non presentate.');
+  }
+  return { ...ride, chargeDecision: decision, updatedAt: nowIso };
+}
+
+// ---------------------------------------------------------------------------
+// Viste
+// ---------------------------------------------------------------------------
+
+export function compareRides(a: Ride, b: Ride): number {
+  return a.time.localeCompare(b.time) || a.room.localeCompare(b.room, 'it', { numeric: true }) || a.createdAt.localeCompare(b.createdAt);
+}
+
+export interface TimeSlotGroup {
+  time: HhMm;
+  rides: Ride[];
+  /** Persone delle corse ancora valide (escluse annullate) nella stessa fascia. */
+  persons: number;
+  overCapacity: boolean;
+}
+
+/** Raggruppa per orario le corse di una direzione, segnalando le fasce oltre i posti disponibili. */
+export function groupBySlot(rides: Ride[], direction: Direction, seats: number): TimeSlotGroup[] {
+  const map = new Map<HhMm, Ride[]>();
+  for (const r of rides.filter((x) => x.direction === direction).sort(compareRides)) {
+    const list = map.get(r.time) ?? [];
+    list.push(r);
+    map.set(r.time, list);
+  }
+  return [...map.entries()].map(([time, list]) => {
+    const persons = list.filter((r) => r.status !== 'annullata').reduce((s, r) => s + r.persons, 0);
+    return { time, rides: list, persons, overCapacity: persons > seats };
+  });
+}
+
+export const STATUS_LABEL: Record<RideStatus, string> = {
+  richiesta: 'Da leggere',
+  confermata: 'Confermata',
+  sul_posto: 'Autista sul posto',
+  completata: 'Fatto',
+  no_show: 'Non presentato',
+  annullata: 'Annullata',
+};
+
+export const DRIVER_MESSAGE_LABEL: Record<DriverMessageKind, string> = {
+  arrivato: 'Sono arrivato',
+  sette_minuti: 'Fra 7 minuti, un po’ di pazienza',
+  traffico: 'C’è traffico, sto arrivando',
+};
+
+export const CHARGE_LABEL: Record<ChargeDecision, string> = {
+  da_valutare: 'Addebito da valutare',
+  addebitare: 'Da addebitare',
+  non_addebitare: 'Nessun addebito',
+};
+
+export const PROBLEM_LABEL_IT: Record<RideInputProblem, string> = {
+  data_non_valida: 'Data non valida.',
+  data_fuori_soggiorno: 'La data è fuori dal soggiorno.',
+  data_troppo_lontana: 'Si può prenotare solo per oggi o domani.',
+  orario_non_valido: 'Orario non valido.',
+  fuori_orario_servizio: 'Orario fuori dal servizio.',
+  troppo_presto: 'Orario troppo vicino: serve più anticipo.',
+  persone_non_valide: 'Numero di persone non valido.',
+  destinazione_non_valida: 'Scegli un impianto.',
+  condizioni_non_accettate: 'Accetta le condizioni di attesa.',
+};
+
+/** Riga CSV della giornata per la reception (separatore «;» per Excel in italiano). */
+export function ridesToCsv(rides: Ride[]): string {
+  const head = ['Data', 'Ora', 'Direzione', 'Camera', 'Persone', 'Impianto', 'Stato', 'Letta alle', 'Ultimo messaggio', 'Arrivato alle', 'Chiusa alle', 'Addebito', 'Note', 'Inserita da', 'ID prenotazione Slope'];
+  const esc = (v: string | number | null): string => {
+    const s = v === null ? '' : String(v);
+    return /[;"\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+  const t = (iso: string | null) => (iso ? new Date(iso).toLocaleTimeString('it-IT', { timeZone: 'Europe/Rome', hour: '2-digit', minute: '2-digit' }) : '');
+  const rows = [...rides].sort(compareRides).map((r) => [
+    r.serviceDate,
+    r.time,
+    r.direction === 'andata' ? 'Andata (hotel → impianto)' : 'Ritorno (impianto → hotel)',
+    r.room,
+    r.persons,
+    r.destinationName,
+    STATUS_LABEL[r.status],
+    t(r.readAt),
+    r.lastMessage ? DRIVER_MESSAGE_LABEL[r.lastMessage] : '',
+    t(r.arrivedAt),
+    t(r.completedAt ?? r.noShowAt ?? r.cancelledAt),
+    r.chargeDecision ? CHARGE_LABEL[r.chargeDecision] : '',
+    r.note,
+    r.createdBy,
+    r.reservationId,
+  ]);
+  return [head, ...rows].map((row) => row.map(esc).join(';')).join('\r\n');
+}

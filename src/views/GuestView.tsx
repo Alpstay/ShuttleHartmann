@@ -1,0 +1,640 @@
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { ArrowDownLeft, ArrowLeft, ArrowUpRight, Bell, BellOff, Check, Clock, LogOut, Mountain, Plus, Users, WifiOff, X } from 'lucide-react';
+import { GUEST_STRINGS, LANGS, detectLang, type GuestStrings, type Lang } from '../domain/i18n';
+import { canGuestCancel, compareRides, earliestSlot, isOpen, suggestedTime, validateRideInput, type RideInputProblem } from '../domain/rules';
+import { addDays, formatShortDate, romeDate, romeTime, romeTimeOf } from '../domain/time';
+import type { Direction, GuestSession, IsoDate, Ride, RideInput, ShuttleSettings } from '../domain/types';
+import { ShuttleError } from '../domain/types';
+import { Button, Countdown, InlineConfirm, Pill, STATUS_TONE, Stepper, chime, cx, unlockSound, useApp, useLocalState, useNow, useOnline, useToast } from '../ui/kit';
+import { AlpstayLogo } from '../ui/Logo';
+import { PinPad } from '../ui/PinPad';
+
+/**
+ * Area ospite, pensata per il telefono: si entra con il numero di camera (o con il QR della camera),
+ * si vede la prossima corsa in grande e si prenota in quattro passi con pulsanti grandi.
+ */
+export function GuestView({ autoLogin, onAutoLoginUsed, sessionKey = 'shuttle-hartmann-guest' }: { autoLogin?: { room: string } | null; onAutoLoginUsed?: () => void; sessionKey?: string }) {
+  const { backend } = useApp();
+  const [lang, setLang] = useLocalState<Lang>('shuttle-guest-lang', detectLang());
+  const t = GUEST_STRINGS[lang];
+  const [session, setSession] = useLocalState<GuestSession | null>(sessionKey, null);
+  const [loginError, setLoginError] = useState<string | null>(null);
+  const tried = useRef(false);
+
+  const login = useCallback(
+    async (room: string) => {
+      setLoginError(null);
+      try {
+        setSession(await backend.guest.login(room));
+      } catch (e) {
+        const code = (e as ShuttleError).code;
+        setLoginError(code === 'troppi_tentativi' ? t.tooManyAttempts : code === 'camera_non_attiva' ? t.loginError : (e as Error).message);
+      }
+    },
+    [backend, setSession, t],
+  );
+
+  useEffect(() => {
+    if (autoLogin && !tried.current && !session) {
+      tried.current = true;
+      void login(autoLogin.room).finally(() => onAutoLoginUsed?.());
+    }
+  }, [autoLogin, login, onAutoLoginUsed, session]);
+
+  const langSwitch = (
+    <div className="flex rounded-lg bg-surface p-0.5" role="group" aria-label="Lingua · Sprache · Language">
+      {LANGS.map((l) => (
+        <button
+          key={l.code}
+          type="button"
+          lang={l.code}
+          aria-pressed={lang === l.code}
+          onClick={() => setLang(l.code)}
+          className={cx('min-h-9 min-w-9 rounded-md px-1.5 text-xs font-bold', lang === l.code ? 'bg-bg shadow-sm ring-1 ring-line' : 'text-muted')}
+        >
+          {l.label}
+        </button>
+      ))}
+    </div>
+  );
+
+  if (!session) {
+    return (
+      <div className="flex min-h-full flex-col bg-bg">
+        <header className="flex justify-end px-4 pt-4">{langSwitch}</header>
+        <div className="flex flex-col items-center gap-4 px-4 pb-2 text-center">
+          <AlpstayLogo variant="completo" title="AlpStay · Be free. Stay true" className="h-auto w-48 text-fg" />
+          <div>
+            <p className="eyebrow">{t.hotel}</p>
+            <h1 className="text-[1.6rem] leading-tight text-gold">{t.appTitle}</h1>
+          </div>
+        </div>
+        <GuestLogin t={t} error={loginError} onLogin={login} />
+      </div>
+    );
+  }
+
+  // In alto c'è poco spazio sul telefono: un solo pulsante che passa da una lingua all'altra.
+  const langCycle = (
+    <Button
+      size="sm"
+      tone="soft"
+      aria-label={`Lingua · Sprache · Language: ${lang.toUpperCase()}`}
+      onClick={() => setLang(LANGS[(LANGS.findIndex((l) => l.code === lang) + 1) % LANGS.length]!.code)}
+      className="min-w-11 font-bold"
+    >
+      {lang.toUpperCase()}
+    </Button>
+  );
+
+  return <GuestHome t={t} session={session} langSwitch={langCycle} onLogout={() => setSession(null)} onExpired={() => (setSession(null), setLoginError(t.loginError))} />;
+}
+
+function GuestLogin({ t, error, onLogin }: { t: GuestStrings; error: string | null; onLogin: (room: string) => Promise<void> }) {
+  const [busy, setBusy] = useState(false);
+  return (
+    <main className="flex flex-col px-4 pb-8 pt-4">
+      <PinPad
+        id="guest-room"
+        label={t.room}
+        hint={t.loginIntro}
+        maxLength={6}
+        masked={false}
+        submitLabel={t.login}
+        busy={busy}
+        error={error}
+        onSubmit={async (room) => {
+          setBusy(true);
+          await onLogin(room);
+          setBusy(false);
+        }}
+      />
+    </main>
+  );
+}
+
+/** Barra in fondo allo schermo, dove arriva il pollice. */
+function BottomBar({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="sticky bottom-0 z-10 mt-auto border-t border-line bg-bg px-4 pt-3" style={{ paddingBottom: 'max(12px, env(safe-area-inset-bottom, 0px))' }}>
+      {children}
+    </div>
+  );
+}
+
+function GuestHome({ t, session, langSwitch, onLogout, onExpired }: { t: GuestStrings; session: GuestSession; langSwitch: React.ReactNode; onLogout: () => void; onExpired: () => void }) {
+  const { backend } = useApp();
+  const now = useNow(1000);
+  const online = useOnline();
+  const [settings, setSettings] = useState<ShuttleSettings | null>(null);
+  const [rides, setRides] = useState<Ride[]>([]);
+  const [sound, setSound] = useLocalState('shuttle-guest-sound', false);
+  const [booking, setBooking] = useState(false);
+  const [flash, setFlash] = useState<string | null>(null);
+  const [toast, showToast] = useToast();
+  const last = useRef<Map<string, string> | null>(null);
+
+  const handleError = useCallback(
+    (e: unknown) => {
+      if ((e as ShuttleError).code === 'sessione_scaduta') onExpired();
+    },
+    [onExpired],
+  );
+
+  // Impianti e regole si ricaricano a ogni aggiornamento: le modifiche della reception arrivano senza ricaricare.
+  const loadSettings = useCallback(() => backend.guest.settings(session.token).then(setSettings, handleError), [backend, session.token, handleError]);
+  useEffect(() => {
+    void loadSettings();
+  }, [loadSettings]);
+
+  const refresh = useCallback(async () => {
+    try {
+      const list = await backend.guest.rides(session.token);
+      // Avviso a ogni novità portata dall'autista (messaggio o stato).
+      const sig = new Map(list.map((r) => [r.id, `${r.status}|${r.lastMessage}|${r.lastMessageAt}`]));
+      if (last.current) {
+        const changed = list.find((r) => last.current!.get(r.id) !== undefined && last.current!.get(r.id) !== sig.get(r.id) && r.lastMessageAt);
+        if (changed) {
+          setFlash(changed.id);
+          if (sound) chime('aggiornamento');
+        }
+      }
+      last.current = sig;
+      setRides(list);
+      void loadSettings();
+    } catch (e) {
+      handleError(e);
+    }
+  }, [backend, session.token, sound, handleError, loadSettings]);
+
+
+  useEffect(() => {
+    void refresh();
+    const id = window.setInterval(() => document.visibilityState === 'visible' && void refresh(), backend.guestPollMs);
+    const onVis = () => document.visibilityState === 'visible' && void refresh();
+    document.addEventListener('visibilitychange', onVis);
+    return () => {
+      window.clearInterval(id);
+      document.removeEventListener('visibilitychange', onVis);
+    };
+  }, [refresh, backend.guestPollMs]);
+
+  const today = romeDate(now);
+  const open = useMemo(() => rides.filter((r) => isOpen(r.status)).sort((a, b) => a.serviceDate.localeCompare(b.serviceDate) || compareRides(a, b)), [rides]);
+  const closedToday = rides.filter((r) => !isOpen(r.status) && r.serviceDate === today);
+  const hero = open[0] ?? null;
+
+  const cancel = async (r: Ride) => {
+    try {
+      await backend.guest.cancelRide(session.token, r.id);
+      showToast(t.cancelled);
+    } catch (e) {
+      handleError(e);
+      showToast((e as ShuttleError).code === 'stato_non_valido' ? t.afterConfirmReception : (e as Error).message, 'bad');
+    }
+    void refresh();
+  };
+
+  if (booking && settings) {
+    return (
+      <BookingWizard
+        t={t}
+        settings={settings}
+        now={now}
+        session={session}
+        onClose={() => setBooking(false)}
+        onBooked={async () => {
+          setBooking(false);
+          showToast(t.sent);
+          await refresh();
+        }}
+        onError={(e) => {
+          handleError(e);
+          showToast((e as Error).message, 'bad');
+        }}
+      />
+    );
+  }
+
+  return (
+    <div className="flex min-h-full flex-col bg-bg">
+      <header className="flex items-center gap-2 px-4 pb-2 pt-4">
+        <AlpstayLogo variant="simbolo" className="h-8 w-auto shrink-0" />
+        {/* Il numero di camera non si accorcia mai: sui telefoni stretti si accorcia il nome dell'hotel. */}
+        <div className="mr-auto">
+          <p className="eyebrow truncate [contain:inline-size]">{t.hotel}</p>
+          <h1 className="tnum whitespace-nowrap font-title text-[1.6rem] leading-tight">{t.roomLabel(session.room)}</h1>
+        </div>
+        <Button
+          size="sm"
+          tone={sound ? 'dark' : 'soft'}
+          aria-pressed={sound}
+          aria-label={sound ? t.soundOn : t.soundOff}
+          title={sound ? t.soundOn : t.soundOff}
+          onClick={() => {
+            if (!sound) {
+              unlockSound();
+              chime('aggiornamento');
+            }
+            setSound(!sound);
+          }}
+        >
+          {sound ? <Bell size={16} /> : <BellOff size={16} />}
+        </Button>
+        {langSwitch}
+        <Button size="sm" tone="ghost" aria-label={t.logout} title={t.logout} onClick={onLogout}>
+          <LogOut size={16} />
+        </Button>
+      </header>
+      {toast}
+      {!online ? (
+        <p className="mx-4 flex items-center gap-2 rounded-xl bg-warn-soft p-3 text-sm text-warn">
+          <WifiOff size={16} /> {t.offline}
+        </p>
+      ) : null}
+
+      <main className="flex flex-col gap-4 px-4 pb-4 pt-2">
+        {hero && settings ? (
+          <HeroRide t={t} ride={hero} settings={settings} now={now} today={today} highlight={flash === hero.id} onCancel={() => void cancel(hero)} />
+        ) : (
+          <div className="flex flex-col items-center gap-2 rounded-2xl border border-dashed border-line px-4 py-10 text-center">
+            <Mountain size={32} className="text-gold" aria-hidden />
+            <p className="text-muted">{t.noRides}</p>
+          </div>
+        )}
+
+        {open.length > 1 || closedToday.length ? (
+          <section aria-labelledby="other-rides" className="flex flex-col gap-2">
+            <h2 id="other-rides" className="eyebrow">
+              {t.otherRides}
+            </h2>
+            <ul className="flex flex-col divide-y divide-line rounded-2xl border border-line">
+              {[...open.slice(1), ...closedToday].map((r) => (
+                <CompactRide key={r.id} t={t} ride={r} today={today} onCancel={() => void cancel(r)} />
+              ))}
+            </ul>
+          </section>
+        ) : null}
+      </main>
+
+      <BottomBar>
+        <Button tone="gold" size="xl" className="w-full" disabled={!settings} onClick={() => void loadSettings().then(() => setBooking(true))}>
+          <Plus size={22} /> {t.newRide}
+        </Button>
+      </BottomBar>
+    </div>
+  );
+}
+
+function dayLabel(t: GuestStrings, date: IsoDate, today: IsoDate): string {
+  return date === today ? t.today : date === addDays(today, 1) ? t.tomorrow : formatShortDate(date);
+}
+
+function route(t: GuestStrings, r: Pick<Ride, 'direction' | 'destinationName'>, short = false): string {
+  const hotel = short ? 'Hotel' : t.hotelName;
+  return r.direction === 'andata' ? `${hotel} → ${r.destinationName}` : `${r.destinationName} → ${hotel}`;
+}
+
+function HeroRide({ t, ride: r, settings, now, today, highlight, onCancel }: { t: GuestStrings; ride: Ride; settings: ShuttleSettings; now: number; today: IsoDate; highlight: boolean; onCancel: () => void }) {
+  const [confirm, setConfirm] = useState(false);
+  const wait = r.status === 'sul_posto' ? (() => {
+    const deadline = Date.parse(r.arrivedAt ?? '') + settings.waitMinutes * 60000;
+    return { deadline, remaining: Math.max(0, deadline - now) };
+  })() : null;
+  return (
+    <article className={cx('flex flex-col gap-4 rounded-2xl border p-4', highlight ? 'slide-in border-gold shadow-md' : 'border-line')} aria-label={t.nextRide}>
+      <p className="eyebrow">{t.nextRide}</p>
+      <div className="flex items-end gap-3">
+        <div>
+          <p className="text-sm font-bold capitalize text-muted">{dayLabel(t, r.serviceDate, today)}</p>
+          <p className="tnum font-title text-5xl leading-none">{r.time}</p>
+        </div>
+        <span className="mb-1 ml-auto inline-flex items-center gap-1 text-muted">
+          <Users size={16} aria-hidden /> <span className="tnum font-bold">{r.persons}</span>
+        </span>
+      </div>
+      <p className="flex items-center gap-2 text-lg font-bold">
+        {r.direction === 'andata' ? <ArrowUpRight size={20} className="text-gold" aria-hidden /> : <ArrowDownLeft size={20} className="text-gold" aria-hidden />}
+        {route(t, r)}
+      </p>
+
+      {r.lastMessage ? (
+        <div className="flex items-start gap-3 rounded-xl bg-gold-soft p-4" role="status">
+          {r.lastMessage === 'arrivato' ? <Check size={24} className="mt-0.5 shrink-0 text-gold" aria-hidden /> : <Clock size={24} className="mt-0.5 shrink-0 text-gold" aria-hidden />}
+          <div className="flex flex-col gap-1">
+            <p className="text-lg font-bold leading-snug">{t.driverMessage[r.lastMessage]}</p>
+            <p className="tnum text-xs text-muted">{romeTimeOf(r.lastMessageAt)}</p>
+          </div>
+        </div>
+      ) : (
+        <p className={cx('self-start rounded-full px-3 py-1 text-sm font-bold', STATUS_TONE[r.status])}>{t.status[r.status]}</p>
+      )}
+
+      {wait && wait.remaining > 0 ? (
+        <p className="flex items-center gap-2 font-bold">
+          {t.waitUntil(romeTime(wait.deadline))}
+          <span className="tnum ml-auto rounded-lg bg-surface px-2.5 py-1 text-lg">
+            <Countdown ms={wait.remaining} />
+          </span>
+        </p>
+      ) : null}
+
+      {canGuestCancel(r) ? (
+        confirm ? (
+          <InlineConfirm question={t.cancelConfirm} confirmLabel={t.cancel} cancelLabel={t.keep} onCancel={() => setConfirm(false)} onConfirm={() => (setConfirm(false), onCancel())} />
+        ) : (
+          <Button size="lg" tone="soft" className="w-full text-bad" onClick={() => setConfirm(true)}>
+            <X size={18} /> {t.cancel}
+          </Button>
+        )
+      ) : (
+        <p className="text-xs text-muted">{settings.receptionPhone ? t.afterConfirmCall(settings.receptionPhone) : t.afterConfirmReception}</p>
+      )}
+    </article>
+  );
+}
+
+function CompactRide({ t, ride: r, today, onCancel }: { t: GuestStrings; ride: Ride; today: IsoDate; onCancel: () => void }) {
+  const [confirm, setConfirm] = useState(false);
+  return (
+    <li className={cx('flex flex-col gap-2 p-3', !isOpen(r.status) && 'opacity-60')}>
+      <div className="flex items-center gap-3">
+        <span className="flex flex-col leading-tight">
+          <span className="text-xs font-bold capitalize text-muted">{dayLabel(t, r.serviceDate, today)}</span>
+          <span className="tnum font-title text-xl">{r.time}</span>
+        </span>
+        <span className="min-w-0 flex-1 truncate text-sm font-bold">{route(t, r, true)}</span>
+        <Pill className={STATUS_TONE[r.status]}>{t.status[r.status].split(',')[0]}</Pill>
+      </div>
+      {canGuestCancel(r) ? (
+        confirm ? (
+          <InlineConfirm question={t.cancelConfirm} confirmLabel={t.cancel} cancelLabel={t.keep} onCancel={() => setConfirm(false)} onConfirm={() => (setConfirm(false), onCancel())} />
+        ) : (
+          <Button size="sm" tone="soft" className="self-start text-bad" onClick={() => setConfirm(true)}>
+            <X size={14} /> {t.cancel}
+          </Button>
+        )
+      ) : null}
+    </li>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Prenotazione in quattro passi
+// ---------------------------------------------------------------------------
+
+function BookingWizard({
+  t,
+  settings,
+  now,
+  session,
+  onClose,
+  onBooked,
+  onError,
+}: {
+  t: GuestStrings;
+  settings: ShuttleSettings;
+  now: number;
+  session: GuestSession;
+  onClose: () => void;
+  onBooked: () => Promise<void>;
+  onError: (e: unknown) => void;
+}) {
+  const { backend } = useApp();
+  const today = romeDate(now);
+  const tomorrow = addDays(today, 1);
+  const todayOpen = earliestSlot(settings, now, today, 'ospite') !== null;
+  const tomorrowOpen = tomorrow <= session.validUntil;
+
+  const [step, setStep] = useState(1);
+  const [direction, setDirection] = useState<Direction>('andata');
+  const [destinationId, setDestinationId] = useState('');
+  const [date, setDate] = useState<IsoDate>(todayOpen ? today : tomorrow);
+  const [time, setTime] = useState('');
+  const [persons, setPersons] = useState(Math.min(settings.seats, Math.max(1, session.persons ?? 2)));
+  const [note, setNote] = useState('');
+  const [noteOpen, setNoteOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [serverProblems, setServerProblems] = useState<RideInputProblem[]>([]);
+
+  const earliest = earliestSlot(settings, now, date, 'ospite');
+  const pickDate = (d: IsoDate) => {
+    setDate(d);
+    setTime(suggestedTime(settings, now, d, direction, 'ospite') ?? '');
+  };
+  useEffect(() => {
+    if (!time) setTime(suggestedTime(settings, now, date, direction, 'ospite') ?? '');
+  }, [time, settings, now, date, direction]);
+
+  const input: RideInput = { serviceDate: date, time, direction, destinationId, persons, note: note.trim() || null, conditionsAccepted: true };
+  const problems = validateRideInput(input, { settings, nowMs: now, actor: 'ospite', stay: { validFrom: today, validUntil: session.validUntil } });
+  const timeProblems = problems.filter((p) => p === 'troppo_presto' || p === 'fuori_orario_servizio' || p === 'orario_non_valido' || p === 'data_non_valida' || p === 'data_fuori_soggiorno' || p === 'data_troppo_lontana');
+  const dest = settings.destinations.find((d) => d.id === destinationId);
+  const total = 4;
+
+  const book = async () => {
+    setBusy(true);
+    setServerProblems([]);
+    try {
+      await backend.guest.createRide(session.token, input);
+      await onBooked();
+    } catch (e) {
+      const codes = ((e as Error).message ?? '').split(',').filter((c): c is RideInputProblem => c in t.problems);
+      if ((e as ShuttleError).code === 'non_valida' && codes.length) setServerProblems(codes);
+      else onError(e);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const titles = [t.whereTo, direction === 'andata' ? t.whichLift : t.fromWhichLift, t.whenWho, t.summary];
+
+  return (
+    <div className="flex min-h-full flex-col bg-bg">
+      <header className="flex items-center gap-2 px-2 pb-1 pt-3">
+        {step > 1 ? (
+          <Button size="md" tone="ghost" aria-label={t.back} onClick={() => setStep(step - 1)}>
+            <ArrowLeft size={22} />
+          </Button>
+        ) : (
+          <Button size="md" tone="ghost" aria-label={t.close} onClick={onClose}>
+            <X size={22} />
+          </Button>
+        )}
+        <div className="flex flex-1 justify-center gap-1.5" aria-label={t.stepOf(step, total)}>
+          {Array.from({ length: total }, (_, i) => (
+            <span key={i} className={cx('h-1.5 w-8 rounded-full', i < step ? 'bg-gold' : 'bg-line')} />
+          ))}
+        </div>
+        <span className="w-11" aria-hidden />
+      </header>
+
+      <main className="flex flex-col gap-4 px-4 pb-4 pt-3">
+        <h2 className="text-[1.6rem] leading-tight">{titles[step - 1]}</h2>
+
+        {step === 1 ? (
+          <div className="flex flex-col gap-3">
+            {(
+              [
+                ['andata', t.goLift, t.goLiftHint, <ArrowUpRight key="a" size={28} />],
+                ['ritorno', t.goHotel, t.goHotelHint, <ArrowDownLeft key="r" size={28} />],
+              ] as [Direction, string, string, React.ReactNode][]
+            ).map(([d, title, hint, icon]) => (
+              <button
+                key={d}
+                type="button"
+                onClick={() => {
+                  setDirection(d);
+                  setTime(suggestedTime(settings, now, date, d, 'ospite') ?? '');
+                  setStep(2);
+                }}
+                className={cx('flex min-h-24 items-center gap-4 rounded-2xl border p-4 text-left active:scale-[0.99]', direction === d && destinationId ? 'border-gold bg-gold-soft' : 'border-line')}
+              >
+                <span className="text-gold">{icon}</span>
+                <span className="flex flex-col">
+                  <span className="text-xl font-bold">{title}</span>
+                  <span className="text-sm text-muted">{hint}</span>
+                </span>
+              </button>
+            ))}
+          </div>
+        ) : null}
+
+        {step === 2 ? (
+          <div className="flex flex-col gap-2">
+            {settings.destinations
+              .filter((d) => d.active)
+              .map((d) => (
+                <button
+                  key={d.id}
+                  type="button"
+                  onClick={() => {
+                    setDestinationId(d.id);
+                    setStep(3);
+                  }}
+                  className={cx('flex min-h-16 items-center gap-3 rounded-2xl border px-4 text-left active:scale-[0.99]', destinationId === d.id ? 'border-gold bg-gold-soft' : 'border-line')}
+                >
+                  <Mountain size={22} className="text-gold" aria-hidden />
+                  <span className="flex flex-col leading-tight">
+                    <span className="text-lg font-bold">{d.name}</span>
+                    <span className="text-sm text-muted">{d.place}</span>
+                  </span>
+                </button>
+              ))}
+          </div>
+        ) : null}
+
+        {step === 3 ? (
+          <div className="flex flex-col gap-5">
+            <div className="grid grid-cols-2 gap-2" role="radiogroup" aria-label={t.day}>
+              {[
+                { d: today, label: t.today, ok: todayOpen },
+                { d: tomorrow, label: t.tomorrow, ok: tomorrowOpen },
+              ].map((o) => (
+                <button
+                  key={o.d}
+                  type="button"
+                  role="radio"
+                  aria-checked={date === o.d}
+                  disabled={!o.ok}
+                  onClick={() => pickDate(o.d)}
+                  className={cx('min-h-14 rounded-2xl border text-lg font-bold disabled:opacity-40', date === o.d ? 'border-gold bg-gold-soft' : 'border-line')}
+                >
+                  {o.label}
+                </button>
+              ))}
+            </div>
+            {!todayOpen ? <p className="-mt-3 text-sm text-muted">{t.noSlots}</p> : null}
+            <div>
+              <label htmlFor="guest-time" className="eyebrow mb-1.5 block">
+                {t.time}
+              </label>
+              <input
+                id="guest-time"
+                type="time"
+                step={300}
+                min={earliest ?? settings.serviceStart}
+                max={settings.serviceEnd}
+                value={time}
+                onChange={(e) => setTime(e.target.value)}
+                className="tnum h-16 w-full rounded-2xl border border-line bg-bg px-4 text-center font-title text-4xl"
+              />
+              <p className="mt-1.5 text-sm text-muted">
+                {earliest ?? settings.serviceStart}–{settings.serviceEnd}
+              </p>
+            </div>
+            <div>
+              <p className="eyebrow mb-1.5">{t.persons}</p>
+              <Stepper label={t.persons} value={persons} min={1} max={settings.seats} onChange={setPersons} />
+            </div>
+            {time && timeProblems.length ? (
+              <p role="alert" className="rounded-xl bg-bad-soft p-3 text-sm font-bold text-bad">
+                {t.problems[timeProblems[0] as RideInputProblem]}
+              </p>
+            ) : null}
+          </div>
+        ) : null}
+
+        {step === 4 ? (
+          <div className="flex flex-col gap-4">
+            <div className="flex flex-col gap-3 rounded-2xl border border-line p-4">
+              <p className="flex items-center gap-2 text-lg font-bold">
+                {direction === 'andata' ? <ArrowUpRight size={20} className="text-gold" aria-hidden /> : <ArrowDownLeft size={20} className="text-gold" aria-hidden />}
+                {route(t, { direction, destinationName: dest?.name ?? '' })}
+              </p>
+              <div className="flex items-end gap-4">
+                <div>
+                  <p className="text-sm font-bold capitalize text-muted">{dayLabel(t, date, today)}</p>
+                  <p className="tnum font-title text-4xl leading-none">{time}</p>
+                </div>
+                <span className="mb-1 inline-flex items-center gap-1">
+                  <Users size={16} aria-hidden /> <span className="tnum font-bold">{persons}</span>
+                </span>
+                <button type="button" onClick={() => setStep(3)} className="mb-1 ml-auto text-sm font-bold text-gold underline">
+                  {t.changeTime}
+                </button>
+              </div>
+            </div>
+
+            {noteOpen ? (
+              <div>
+                <label htmlFor="guest-note" className="eyebrow mb-1.5 block">
+                  {t.note}
+                </label>
+                <input id="guest-note" value={note} maxLength={200} onChange={(e) => setNote(e.target.value)} placeholder={t.notePlaceholder} className="min-h-12 w-full rounded-xl border border-line bg-bg px-3.5 text-base" />
+              </div>
+            ) : (
+              <button type="button" onClick={() => setNoteOpen(true)} className="self-start text-sm font-bold text-muted underline">
+                + {t.addNote}
+              </button>
+            )}
+
+            <p className="rounded-2xl bg-surface p-4 text-sm leading-relaxed">{t.conditions(settings.waitMinutes)}</p>
+
+            {[...new Set([...problems, ...serverProblems])].length ? (
+              <ul role="alert" className="flex flex-col gap-1 rounded-xl bg-bad-soft p-3 text-sm font-bold text-bad">
+                {[...new Set([...problems, ...serverProblems])].map((p) => (
+                  <li key={p}>{t.problems[p]}</li>
+                ))}
+              </ul>
+            ) : null}
+          </div>
+        ) : null}
+      </main>
+
+      {step >= 3 ? (
+        <BottomBar>
+          {step === 3 ? (
+            <Button tone="dark" size="xl" className="w-full" disabled={!time || timeProblems.length > 0} onClick={() => setStep(4)}>
+              {t.next}
+            </Button>
+          ) : (
+            <Button tone="gold" size="xl" className="w-full" disabled={busy || problems.length > 0} onClick={() => void book()}>
+              <Check size={22} /> {busy ? t.sending : t.acceptAndBook}
+            </Button>
+          )}
+        </BottomBar>
+      ) : null}
+    </div>
+  );
+}

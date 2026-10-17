@@ -1,0 +1,39 @@
+{
+  "name": "shuttle-hartmann",
+  "version": "1.0.0",
+  "description": "Servizio shuttle Chalet Hotel Hartmann: reception, ospite, autista",
+  "scripts": {
+    "dev": "vite --open /app.html",
+    "dev:demo": "vite --mode demo --open /demo.html",
+    "build": "tsc --noEmit && vite build && node scripts/publish-root.mjs",
+    "build:demo": "tsc --noEmit && vite build --mode demo && node scripts/to-artifact.mjs",
+    "build:tools": "esbuild tools/src/presenze-cli.ts --bundle --platform=node --format=esm --target=node20 --outfile=tools/presenze.mjs --banner:js=\"// Generato da tools/src/presenze-cli.ts con npm run build:tools: non modificare a mano.\"",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:sql": "node tests/sql/schema.test.mjs"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "2.49.8",
+    "lucide-react": "0.511.0",
+    "qrcode-generator": "1.4.4",
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "0.3.2",
+    "@tailwindcss/vite": "4.1.8",
+    "@types/node": "22.15.21",
+    "@types/react": "18.3.23",
+    "@types/react-dom": "18.3.7",
+    "@vitejs/plugin-react": "4.4.1",
+    "esbuild": "0.25.4",
+    "jsdom": "26.1.0",
+    "tailwindcss": "4.1.8",
+    "typescript": "5.8.3",
+    "vite": "6.3.5",
+    "vite-plugin-singlefile": "2.2.0",
+    "vitest": "3.1.4"
+  },
+  "private": true,
+  "type": "module"
+}
