@@ -170,6 +170,18 @@ function toShuttleError(e: { message?: string } | null | undefined): ShuttleErro
   }
 }
 
+/** Errore dell'accesso anonimo dello staff tradotto in una causa chiara (impostazione di Supabase, limite, rete). */
+function anonymousSignInError(e: { message?: string; code?: string; status?: number }): ShuttleError {
+  const text = `${e.code ?? ''} ${e.message ?? ''}`.toLowerCase();
+  if (text.includes('anonymous')) {
+    return new ShuttleError('non_autorizzato', 'Su Supabase l’accesso anonimo è spento: attiva «Allow anonymous sign-ins» in Authentication → Sign In / Providers.');
+  }
+  if (e.status === 429 || text.includes('rate limit')) {
+    return new ShuttleError('troppi_tentativi', 'Troppi accessi da questa rete: riprova tra qualche minuto.');
+  }
+  return new ShuttleError('rete', `Accesso non disponibile: controlla la connessione${e.message ? ` (${e.message})` : ''}.`);
+}
+
 async function rpc<T>(client: SupabaseClient, fn: string, args: Record<string, unknown>): Promise<T> {
   const { data, error } = await client.rpc(fn, args);
   if (error) throw toShuttleError(error);
@@ -203,7 +215,7 @@ export function createSupabaseBackend(url: string, anonKey: string): ShuttleBack
       const { data } = await client.auth.getSession();
       if (!data.session) {
         const { error } = await client.auth.signInAnonymously();
-        if (error) throw new ShuttleError('rete', 'Accesso non disponibile: controlla la connessione.');
+        if (error) throw anonymousSignInError(error);
       }
       const res = await rpc<{ role?: StaffRole; error?: 'pin_errato' | 'troppi_tentativi' | 'non_autorizzato' }>(client, 'shuttle_staff_login', { p_pin: pin });
       if (res.error === 'troppi_tentativi') throw new ShuttleError('troppi_tentativi', 'Troppi tentativi: riprova tra 10 minuti.');
