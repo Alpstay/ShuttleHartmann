@@ -72,7 +72,8 @@ GitHub Pages  index.html ◀── reception (password presenze, rilettura ogni 
    Poi, sempre nell'SQL Editor, imposta i PIN iniziali (scrivili solo lì, mai in un file del repository):
    `select public.shuttle_admin_set_pin('reception', '<PIN reception>');` e
    `select public.shuttle_admin_set_pin('autista', '<PIN autista>');`.
-   In *Authentication → Sign In / Providers* attiva **Allow anonymous sign-ins**.
+   In *Authentication → Sign In / Providers* attiva **Allow new users to sign up** e **Allow anonymous sign-ins**
+   (l'accesso anonimo conta come iscrizione) e disattiva il provider **Email**, che lo shuttle non usa.
 2. **Repository** `Alpstay/ShuttleHartmann` (pubblico, come WelcomeHartmann) con GitHub Pages su `main`, radice.
 3. **Build**: copia `.env.example` in `.env`, inserisci URL e Publishable key di Supabase, poi
    `npm install && npm run build` → `index.html`. Pubblica `index.html`, le cartelle `ospite/`, `reception/`,

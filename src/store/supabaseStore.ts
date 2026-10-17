@@ -173,6 +173,9 @@ function toShuttleError(e: { message?: string } | null | undefined): ShuttleErro
 /** Errore dell'accesso anonimo dello staff tradotto in una causa chiara (impostazione di Supabase, limite, rete). */
 function anonymousSignInError(e: { message?: string; code?: string; status?: number }): ShuttleError {
   const text = `${e.code ?? ''} ${e.message ?? ''}`.toLowerCase();
+  if (text.includes('signup')) {
+    return new ShuttleError('non_autorizzato', 'Su Supabase le nuove iscrizioni sono chiuse: attiva «Allow new users to sign up» in Authentication → Sign In / Providers.');
+  }
   if (text.includes('anonymous')) {
     return new ShuttleError('non_autorizzato', 'Su Supabase l’accesso anonimo è spento: attiva «Allow anonymous sign-ins» in Authentication → Sign In / Providers.');
   }
