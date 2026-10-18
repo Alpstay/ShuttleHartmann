@@ -48,6 +48,11 @@ const dropsOf = (t: Trip): { id: string; name: string }[] =>
     ? [{ id: HOTEL_PICKUP, name: 'Hotel' }]
     : [...new Map(t.rides.map((r) => [r.destinationId, { id: r.destinationId, name: r.destinationName }])).values()];
 const roomsOf = (t: Trip): string => t.rides.map((r) => r.room).join(' · ');
+/** «105», «105 e 107», «105, 107 e 108»: le camere come si direbbero a voce. */
+const roomsSpoken = (t: Trip): string => {
+  const rooms = t.rides.map((r) => r.room);
+  return rooms.length < 2 ? (rooms[0] ?? '') : `${rooms.slice(0, -1).join(', ')} e ${rooms[rooms.length - 1]}`;
+};
 
 /**
  * Area autista, pensata per il telefono sul mezzo: un viaggio alla volta, grande e colorato, con le sole
@@ -333,7 +338,8 @@ function PlacePill({ id, name, settings, size = 'md', className }: { id: string;
 
 const CHIP: Record<RideStatus, { label: string; cls: string }> = {
   richiesta: { label: 'Nuova', cls: 'bg-[#f2c94c] text-[var(--d-ink)]' },
-  confermata: { label: 'Letta', cls: 'bg-[#d6e6f7] text-[#1f4f86]' },
+  // Dopo «arrivo fra 7 minuti» o «c'è traffico» l'autista è in viaggio verso il ritiro.
+  confermata: { label: 'Sto andando', cls: 'bg-[#d2efe3] text-[#0c5a45]' },
   sul_posto: { label: 'Sul posto', cls: 'bg-[var(--d-warn)] text-[var(--d-ink)]' },
   completata: { label: 'Fatto', cls: 'bg-[var(--d-ok)] text-white' },
   no_show: { label: 'Non presentato', cls: 'bg-[var(--d-bad)] text-white' },
@@ -440,22 +446,28 @@ function TripCard({ trip: t, clash, settings, now, act }: { trip: Trip; clash: R
           <p className="text-xs font-black uppercase tracking-[0.18em] text-[var(--d-ink-soft)]">{unread ? 'Nuova · conferma la lettura' : arrived ? 'Sul posto' : depart ? 'Parti ora' : 'Adesso'}</p>
           <p className="tnum text-[4.5rem] font-black leading-[0.95] tracking-tight">{t.time}</p>
         </div>
-        <div className="ml-auto flex flex-col items-end gap-1.5 pt-1">
-          <span className="rounded-full border-2 border-[var(--d-ink)] px-3 py-0.5 text-sm font-black uppercase tracking-wide">{t.direction === 'andata' ? 'Andata' : 'Ritorno'}</span>
-          <span className="inline-flex items-center gap-1.5 text-2xl font-black" aria-label={`${t.persons} persone`}>
-            <Users size={22} aria-hidden /> {t.persons}
-          </span>
-        </div>
+        <span className="ml-auto mt-1 shrink-0 rounded-full border-2 border-[var(--d-ink)] px-3 py-0.5 text-sm font-black uppercase tracking-wide">{t.direction === 'andata' ? 'Andata' : 'Ritorno'}</span>
       </div>
 
-      {/* Da dove a dove, con i colori degli impianti. */}
-      <div className="flex flex-col gap-2">
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="text-xs font-black uppercase tracking-[0.18em] text-[var(--d-ink-soft)]">Ritiro</span>
+      {/* La risposta a «chi devo andare a prendere?», scritta per esteso: chi, dove, dove portarli. */}
+      <div className="flex flex-col gap-2.5 rounded-2xl bg-[var(--d-card-2)] p-3.5">
+        <p className="text-xs font-black uppercase tracking-[0.18em] text-[var(--d-ink-soft)]">Vai a prendere</p>
+        <div>
+          <p className="text-[1.65rem] font-black leading-tight">
+            {many ? 'Camere' : 'Camera'} {roomsSpoken(t)}
+          </p>
+          <p className="inline-flex items-center gap-1.5 text-lg font-black">
+            <Users size={20} aria-hidden /> {t.persons} {t.persons === 1 ? 'persona' : 'persone'}
+          </p>
+        </div>
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+          <span className="w-20 shrink-0 text-xs font-black uppercase tracking-[0.18em] text-[var(--d-ink-soft)]">Ritiro</span>
           <PlacePill id={t.pickup} name={pickupOf(t)} settings={settings} size="lg" />
         </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <ArrowRight size={20} className="text-[var(--d-ink-soft)]" aria-label="poi a" />
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+          <span className="inline-flex w-20 shrink-0 items-center gap-1 text-xs font-black uppercase tracking-[0.18em] text-[var(--d-ink-soft)]">
+            Portali <ArrowRight size={14} aria-hidden />
+          </span>
           {drops.map((d) => (
             <PlacePill key={d.id} id={d.id} name={d.name} settings={settings} size="md" />
           ))}
@@ -498,13 +510,14 @@ function TripCard({ trip: t, clash, settings, now, act }: { trip: Trip; clash: R
               <span className="tnum flex h-12 min-w-14 items-center justify-center rounded-xl bg-[var(--d-ink)] px-2 text-2xl font-black text-[var(--d-cream)]" aria-label={`Camera ${r.room}`}>
                 {r.room}
               </span>
-              <span className="flex min-w-0 flex-1 flex-col">
-                <span className="text-lg font-black">
+              {/* Persone e stato una sotto l'altro: restano leggibili anche sui telefoni stretti. */}
+              <span className="flex min-w-0 flex-1 flex-col items-start gap-1">
+                <span className="whitespace-nowrap text-lg font-black leading-tight">
                   {r.persons} {r.persons === 1 ? 'persona' : 'persone'}
+                  {t.direction === 'andata' && drops.length > 1 ? <span className="text-sm font-bold text-[var(--d-ink-soft)]"> → {r.destinationName}</span> : null}
                 </span>
-                {t.direction === 'andata' && drops.length > 1 ? <span className="truncate text-sm font-bold text-[var(--d-ink-soft)]">→ {r.destinationName}</span> : null}
+                <StatusChip status={r.status} />
               </span>
-              <StatusChip status={r.status} />
             </div>
             {r.note ? <p className="rounded-xl bg-[var(--d-card-2)] px-3 py-2 italic">“{r.note}”</p> : null}
             {arrived && many ? (
