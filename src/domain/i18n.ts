@@ -77,6 +77,16 @@ export interface GuestStrings {
   otherRides: string;
   changeTime: string;
   soundOff: string;
+  // intestazione (etichette brevi sotto le icone)
+  soundShort: string;
+  languageShort: string;
+  // viaggi: il mezzo è uno solo
+  busyTitle: string;
+  busyHint: string;
+  fullTitle: string;
+  freeTimes: string;
+  joinTrip: string;
+  noFreeTimes: string;
   stepOf: (n: number, total: number) => string;
 }
 
@@ -144,6 +154,8 @@ const it: GuestStrings = {
     persone_non_valide: 'Numero di persone non valido.',
     destinazione_non_valida: 'Scegli un impianto.',
     condizioni_non_accettate: 'Accetta le condizioni per inviare.',
+    orario_occupato: 'A quest’ora la navetta è già impegnata: scegli un altro orario.',
+    posti_esauriti: 'La navetta di quest’ora è già piena: scegli un altro orario.',
   },
   from: 'Da',
   to: 'A',
@@ -169,6 +181,14 @@ const it: GuestStrings = {
   otherRides: 'Altre corse',
   changeTime: 'Cambia orario',
   soundOff: 'Suono spento',
+  soundShort: 'Avvisi',
+  languageShort: 'Lingua',
+  busyTitle: 'A quest’ora la navetta è già impegnata',
+  busyHint: 'La navetta è una sola: scegli uno di questi orari.',
+  fullTitle: 'La navetta di quest’ora è già piena',
+  freeTimes: 'Orari disponibili',
+  joinTrip: 'con altri ospiti',
+  noFreeTimes: 'Nessun orario libero in questo giorno: chiama la reception.',
   stepOf: (n, t) => `Passo ${n} di ${t}`,
 };
 
@@ -236,6 +256,8 @@ const de: GuestStrings = {
     persone_non_valide: 'Ungültige Personenzahl.',
     destinazione_non_valida: 'Bitte einen Lift wählen.',
     condizioni_non_accettate: 'Bitte akzeptieren Sie die Bedingungen.',
+    orario_occupato: 'Zu dieser Zeit ist der Shuttle schon unterwegs: bitte eine andere Uhrzeit wählen.',
+    posti_esauriti: 'Der Shuttle zu dieser Zeit ist voll: bitte eine andere Uhrzeit wählen.',
   },
   from: 'Von',
   to: 'Nach',
@@ -261,6 +283,14 @@ const de: GuestStrings = {
   otherRides: 'Weitere Fahrten',
   changeTime: 'Uhrzeit ändern',
   soundOff: 'Ton aus',
+  soundShort: 'Ton',
+  languageShort: 'Sprache',
+  busyTitle: 'Zu dieser Zeit ist der Shuttle schon unterwegs',
+  busyHint: 'Es gibt nur einen Shuttle: bitte eine dieser Zeiten wählen.',
+  fullTitle: 'Der Shuttle zu dieser Zeit ist voll',
+  freeTimes: 'Freie Zeiten',
+  joinTrip: 'mit anderen Gästen',
+  noFreeTimes: 'An diesem Tag ist keine Zeit mehr frei: bitte die Rezeption anrufen.',
   stepOf: (n, t) => `Schritt ${n} von ${t}`,
 };
 
@@ -328,6 +358,8 @@ const en: GuestStrings = {
     persone_non_valide: 'Invalid number of people.',
     destinazione_non_valida: 'Please choose a lift.',
     condizioni_non_accettate: 'Please accept the conditions to send.',
+    orario_occupato: 'The shuttle is already busy at this time: please pick another time.',
+    posti_esauriti: 'The shuttle at this time is already full: please pick another time.',
   },
   from: 'From',
   to: 'To',
@@ -353,6 +385,14 @@ const en: GuestStrings = {
   otherRides: 'Other rides',
   changeTime: 'Change time',
   soundOff: 'Sound off',
+  soundShort: 'Alerts',
+  languageShort: 'Language',
+  busyTitle: 'The shuttle is already busy at this time',
+  busyHint: 'There is only one shuttle: please pick one of these times.',
+  fullTitle: 'The shuttle at this time is already full',
+  freeTimes: 'Available times',
+  joinTrip: 'with other guests',
+  noFreeTimes: 'No free time left on this day: please call reception.',
   stepOf: (n, t) => `Step ${n} of ${t}`,
 };
 

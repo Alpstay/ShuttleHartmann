@@ -10,6 +10,8 @@ import {
   applyDone,
   applyDriverMessage,
   applyNoShow,
+  busySlots,
+  checkTrip,
   compareRides,
   isStayValid,
   normalizeRoom,
@@ -34,7 +36,7 @@ import { ShuttleError } from '../domain/types';
 import type { GuestApi, ShuttleBackend, StaffApi, StaffAuth, StaffDevices, StaffRole, StaffUser } from './ShuttleStore';
 
 interface DemoState {
-  version: 3;
+  version: 4;
   settings: ShuttleSettings;
   stays: ShuttleStay[];
   rides: Ride[];
@@ -46,7 +48,7 @@ interface DemoState {
   staffSessions: Record<string, { role: StaffRole; at: string }>;
 }
 
-const STORAGE_KEY = 'shuttle-hartmann-demo-v3';
+const STORAGE_KEY = 'shuttle-hartmann-demo-v4';
 const MAX_FAILED = 5;
 const LOCK_MS = 10 * 60000;
 
@@ -89,7 +91,7 @@ export function createDemoBackend(opts: DemoOptions = {}): DemoHub {
       const raw = localStorage.getItem(STORAGE_KEY);
       if (!raw) return null;
       const parsed = JSON.parse(raw) as DemoState;
-      if (parsed.version !== 3 || !parsed.rides.some((r) => r.serviceDate >= romeDate(clock.now()))) return null;
+      if (parsed.version !== 4 || !parsed.rides.some((r) => r.serviceDate >= romeDate(clock.now()))) return null;
       return parsed;
     } catch {
       return null;
@@ -358,6 +360,7 @@ export function createDemoBackend(opts: DemoOptions = {}): DemoHub {
       return { token, stayId: stay.id, room: stay.room, persons: stay.persons, validUntil: stay.validUntil } satisfies GuestSession;
     },
     settings: async (token) => (sessionStay(token), state.settings),
+    busy: async (token, date) => (sessionStay(token), busySlots(state.rides, date)),
     rides: async (token) => {
       const stay = sessionStay(token);
       const today = romeDate(clock.now());
@@ -369,6 +372,9 @@ export function createDemoBackend(opts: DemoOptions = {}): DemoHub {
       const stay = sessionStay(token);
       const problems = validateRideInput(input, { settings: state.settings, nowMs: clock.now(), actor: 'ospite', stay });
       if (problems.length) throw new ShuttleError('non_valida', problems.join(','));
+      // Il mezzo è uno solo: niente viaggi sovrapposti né oltre i posti (come shuttle_trip_problem sul server).
+      const trip = checkTrip(input, busySlots(state.rides, input.serviceDate), state.settings);
+      if (trip) throw new ShuttleError('non_valida', trip);
       const ride = newRide(input, { room: stay.room, stayId: stay.id, reservationId: stay.reservationId, createdBy: 'ospite' });
       commit({ ...state, rides: [...state.rides, ride], events: [...state.events, event(ride.id, 'creata', 'ospite')] });
       return ride;
@@ -450,12 +456,13 @@ function seed(nowMs: number, pins: Record<StaffRole, string>, signedIn: Record<s
   const rides: Ride[] = [
     base('101', { direction: 'andata', time: t(-120), status: 'completata', readAt: iso(-135), lastMessage: 'arrivato', lastMessageAt: iso(-121), arrivedAt: iso(-121), completedAt: iso(-118) }),
     base('107', { direction: 'andata', time: t(-120), persons: 3, status: 'completata', readAt: iso(-134), lastMessage: 'arrivato', lastMessageAt: iso(-121), arrivedAt: iso(-121), completedAt: iso(-118), note: 'Sci e scarponi' }),
-    base('119', { direction: 'andata', time: t(-90), destinationId: 'col-raiser', destinationName: 'Col Raiser', status: 'completata', readAt: iso(-100), lastMessage: 'sette_minuti', lastMessageAt: iso(-100), arrivedAt: iso(-91), completedAt: iso(-89) }),
+    base('119', { direction: 'andata', time: t(-90), destinationId: 'col-raiser', destinationName: 'Col Raiser (Gardena Ronda/Saslong)', status: 'completata', readAt: iso(-100), lastMessage: 'sette_minuti', lastMessageAt: iso(-100), arrivedAt: iso(-91), completedAt: iso(-89) }),
     base('121', { direction: 'ritorno', time: t(-45), destinationId: 'alpe-di-siusi', destinationName: 'Alpe di Siusi', status: 'no_show', readAt: iso(-60), lastMessage: 'arrivato', lastMessageAt: iso(-46), arrivedAt: iso(-46), noShowAt: iso(-40), chargeDecision: 'da_valutare' }),
     base('105', { direction: 'ritorno', time: t(10), status: 'confermata', readAt: iso(-3), lastMessage: 'sette_minuti', lastMessageAt: iso(-3) }),
     base('107', { direction: 'ritorno', time: t(10), persons: 3, status: 'confermata', readAt: iso(-3), lastMessage: 'sette_minuti', lastMessageAt: iso(-3) }),
     base('101', { direction: 'ritorno', time: t(40), status: 'richiesta', createdAt: iso(-8), updatedAt: iso(-8) }),
-    base('119', { direction: 'ritorno', time: t(55), destinationId: 'col-raiser', destinationName: 'Col Raiser', status: 'richiesta', createdBy: 'reception', conditionsAcceptedAt: null, createdAt: iso(-15), updatedAt: iso(-15) }),
+    // Stessa ora del ritorno da Seceda della 101: conflitto da mostrare a reception e autista.
+    base('119', { direction: 'ritorno', time: t(40), destinationId: 'col-raiser', destinationName: 'Col Raiser (Gardena Ronda/Saslong)', status: 'richiesta', createdBy: 'reception', conditionsAcceptedAt: null, createdAt: iso(-15), updatedAt: iso(-15) }),
     base('105', { direction: 'andata', serviceDate: addDays(today, 1), time: '09:15', destinationId: 'alpe-di-siusi', destinationName: 'Alpe di Siusi', status: 'richiesta', createdAt: iso(-20), updatedAt: iso(-20) }),
   ];
 
@@ -468,7 +475,7 @@ function seed(nowMs: number, pins: Record<StaffRole, string>, signedIn: Record<s
   });
 
   return {
-    version: 3,
+    version: 4,
     settings: { ...DEFAULT_SETTINGS, rooms: [...DEFAULT_SETTINGS.rooms], updatedAt: iso(-24 * 60) },
     stays,
     rides,

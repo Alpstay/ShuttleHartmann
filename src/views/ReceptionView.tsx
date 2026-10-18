@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowDownLeft, ArrowLeft, ArrowUpRight, BellRing, Check, Circle, CircleX, Download, KeyRound, Lock, Plus, RefreshCw, Settings, Trash2, UserX, X } from 'lucide-react';
+import { AlertTriangle, ArrowDownLeft, ArrowLeft, ArrowUpRight, BellRing, Check, Circle, CircleX, Download, KeyRound, Lock, Plus, RefreshCw, Settings, Trash2, UserX, X } from 'lucide-react';
 import { GUEST_STRINGS } from '../domain/i18n';
-import { CHARGE_LABEL, DRIVER_MESSAGE_LABEL, compareRides, isOpen, isStayValid, ridesToCsv, waitState } from '../domain/rules';
+import { CHARGE_LABEL, DRIVER_MESSAGE_LABEL, compareRides, isOpen, isStayValid, rideConflicts, ridesToCsv, waitState } from '../domain/rules';
 import { addDays, formatLongDate, formatShortDate, romeDate, romeMinutesOfDay, romeTimeOf, toMinutes } from '../domain/time';
 import type { Direction, IsoDate, PresenceSnapshot, Ride, RideEvent, ShuttleSettings, ShuttleStay } from '../domain/types';
 import { PresenceError, roomPresences, roomsToSync, type RoomPresence } from '../presence/presence';
@@ -35,6 +35,8 @@ export function ReceptionView({ onSignOut }: { onSignOut?: () => void }) {
   const [alerts, setAlerts] = useState<{ id: string; text: string }[]>([]);
 
   useEffect(() => staff.watchRides(date, setRides, (e) => showToast(e.message, 'bad')), [staff, date, showToast]);
+  // Il mezzo è uno solo: corse del giorno in viaggi sovrapposti (stessa fascia, posti diversi) o oltre i posti.
+  const conflicts = useMemo(() => (settings ? rideConflicts(rides, settings) : new Map<string, Ride[]>()), [rides, settings]);
 
   // Il suono degli avvisi si sblocca al primo tocco sulla pagina (i browser bloccano l'audio non richiesto).
   useEffect(() => {
@@ -260,6 +262,7 @@ export function ReceptionView({ onSignOut }: { onSignOut?: () => void }) {
                   now={now}
                   settings={settings}
                   rides={rides.filter((r) => r.room === rp.room).sort(compareRides)}
+                  conflicts={conflicts}
                   stay={stays.find((s) => s.room === rp.room && !s.revokedAt && isStayValid(s, now)) ?? null}
                   open={openRow === rp.room}
                   onToggle={() => setOpenRow(openRow === rp.room ? null : rp.room)}
@@ -291,6 +294,7 @@ function RoomLine({
   now,
   settings,
   rides,
+  conflicts,
   stay,
   open,
   onToggle,
@@ -304,6 +308,7 @@ function RoomLine({
   now: number;
   settings: ShuttleSettings;
   rides: Ride[];
+  conflicts: Map<string, Ride[]>;
   stay: ShuttleStay | null;
   open: boolean;
   onToggle: () => void;
@@ -324,7 +329,7 @@ function RoomLine({
           {dir === 'andata' ? 'Andata' : 'Ritorno'}
         </span>
         {list.length ? (
-          list.map((r) => <RideCell key={r.id} ride={r} settings={settings} now={now} date={date} act={act} />)
+          list.map((r) => <RideCell key={r.id} ride={r} settings={settings} now={now} date={date} act={act} clash={conflicts.get(r.id)} />)
         ) : (
           <span className="flex min-h-11 items-center text-muted" aria-label="Nessuna corsa">
             —
@@ -361,7 +366,7 @@ function RoomLine({
 }
 
 /** Spunta della corsa: fatto, non fatto (con lo stato del momento) o non presentato. */
-function RideCell({ ride: r, settings, now, date, act }: { ride: Ride; settings: ShuttleSettings; now: number; date: IsoDate; act: (fn: () => Promise<unknown>, ok?: string) => Promise<void> }) {
+function RideCell({ ride: r, settings, now, date, act, clash }: { ride: Ride; settings: ShuttleSettings; now: number; date: IsoDate; act: (fn: () => Promise<unknown>, ok?: string) => Promise<void>; clash?: Ride[] }) {
   const { backend } = useApp();
   const [open, setOpen] = useState(false);
   const [events, setEvents] = useState<RideEvent[] | null>(null);
@@ -392,7 +397,7 @@ function RideCell({ ride: r, settings, now, date, act }: { ride: Ride; settings:
             : 'Confermata';
 
   return (
-    <div className={cx('flex flex-col rounded-xl border', cancelled ? 'border-dashed border-line bg-surface opacity-75' : done ? 'border-ok/30 bg-ok-soft' : noShow ? 'border-bad/30 bg-bad-soft' : late ? 'border-warn/50 bg-warn-soft' : 'border-line bg-bg')}>
+    <div className={cx('flex flex-col rounded-xl border', cancelled ? 'border-dashed border-line bg-surface opacity-75' : done ? 'border-ok/30 bg-ok-soft' : noShow ? 'border-bad/30 bg-bad-soft' : late || clash ? 'border-warn/60 bg-warn-soft' : 'border-line bg-bg')}>
       <button
         type="button"
         aria-expanded={open}
@@ -437,6 +442,16 @@ function RideCell({ ride: r, settings, now, date, act }: { ride: Ride; settings:
           </span>
         </span>
       </button>
+
+      {clash?.length ? (
+        <p className="flex items-start gap-1.5 px-2 pb-2 text-xs font-bold text-warn">
+          <AlertTriangle size={14} className="mt-px shrink-0" aria-hidden />
+          <span>
+            Mezzo già impegnato:{' '}
+            {clash.map((o) => `${o.time} camera ${o.room} (${o.direction === 'andata' ? `Hotel → ${o.destinationName}` : `da ${o.destinationName}`})`).join(' · ')}
+          </span>
+        </p>
+      ) : null}
 
       {noShow && r.chargeDecision === 'da_valutare' ? (
         <div className="flex flex-wrap gap-1.5 px-2 pb-2">
@@ -660,6 +675,18 @@ function NewRidePanel({
   const { backend } = useApp();
   const [room, setRoom] = useState(initialRoom);
   const [error, setError] = useState<string | null>(null);
+  // Corse di oggi e domani, per avvisare dei viaggi sovrapposti mentre si sceglie l'orario.
+  const today = romeDate(now);
+  const tomorrow = addDays(today, 1);
+  const [dayRides, setDayRides] = useState<Record<string, Ride[]>>({});
+  useEffect(() => {
+    const offA = backend.staff.watchRides(today, (l) => setDayRides((m) => ({ ...m, [today]: l })));
+    const offB = backend.staff.watchRides(tomorrow, (l) => setDayRides((m) => ({ ...m, [tomorrow]: l })));
+    return () => {
+      offA();
+      offB();
+    };
+  }, [backend, today, tomorrow]);
   const rp = rooms.find((r) => r.room === room);
   const stay = stays.find((s) => s.room === room && !s.revokedAt && isStayValid(s, now)) ?? null;
   const persons = rp?.current ? rp.current.adults + rp.current.children : stay?.persons ?? null;
@@ -681,6 +708,7 @@ function NewRidePanel({
           defaultPersons={persons}
           submitLabel="Inserisci corsa"
           blocked={!room}
+          rides={[...(dayRides[today] ?? []), ...(dayRides[tomorrow] ?? [])]}
           header={
             <fieldset>
               <legend className="eyebrow mb-1.5">Camera</legend>

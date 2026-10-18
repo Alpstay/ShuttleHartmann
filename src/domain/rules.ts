@@ -9,6 +9,7 @@ import {
 } from './time';
 import type {
   Actor,
+  BusySlot,
   ChargeDecision,
   Direction,
   DriverMessageKind,
@@ -29,8 +30,8 @@ export const DEFAULT_SETTINGS: ShuttleSettings = {
   destinations: [
     { id: 'seceda', name: 'Seceda', place: 'Ortisei', active: true },
     { id: 'alpe-di-siusi', name: 'Alpe di Siusi', place: 'Ortisei', active: true },
-    { id: 'resciesa', name: 'Resciesa', place: 'Ortisei', active: true },
-    { id: 'col-raiser', name: 'Col Raiser', place: 'S. Cristina', active: true },
+    { id: 'palmer', name: 'Palmer (Campetti scuola)', place: 'Ortisei', active: true },
+    { id: 'col-raiser', name: 'Col Raiser (Gardena Ronda/Saslong)', place: 'S. Cristina', active: true },
     { id: 'monte-pana', name: 'Monte Pana', place: 'S. Cristina', active: true },
   ],
   seats: 8,
@@ -39,6 +40,7 @@ export const DEFAULT_SETTINGS: ShuttleSettings = {
   serviceEnd: '17:30',
   minLeadMinutes: 15,
   receptionPhone: '',
+  pickupGapMinutes: 20,
   updatedAt: '1970-01-01T00:00:00.000Z',
 };
 
@@ -65,7 +67,10 @@ export type RideInputProblem =
   | 'troppo_presto'
   | 'persone_non_valide'
   | 'destinazione_non_valida'
-  | 'condizioni_non_accettate';
+  | 'condizioni_non_accettate'
+  // Dal controllo dei viaggi (checkTrip): il mezzo è uno solo.
+  | 'orario_occupato'
+  | 'posti_esauriti';
 
 export interface ValidationContext {
   settings: ShuttleSettings;
@@ -161,6 +166,147 @@ export function shiftTime(
   const hi = toMinutes(settings.serviceEnd);
   const next = Math.min(hi, Math.max(lo, toMinutes(time) + delta));
   return fromMinutes(next);
+}
+
+// ---------------------------------------------------------------------------
+// Viaggi: il mezzo è uno solo
+// ---------------------------------------------------------------------------
+//
+// Un viaggio = stessa data, stesso orario, stesso punto di ritiro (l'hotel all'andata, l'impianto al
+// ritorno): più camere possono condividerlo fino ai posti del mezzo. Due viaggi diversi devono stare ad
+// almeno `pickupGapMinutes` di distanza, altrimenti l'autista dovrebbe essere in due posti insieme.
+// Stesse regole in shuttle_trip_problem() di supabase/schema.sql.
+
+export const HOTEL_PICKUP = 'hotel';
+
+type TripFields = Pick<Ride, 'serviceDate' | 'time' | 'direction' | 'destinationId'>;
+
+/** Punto di ritiro: l'hotel all'andata, l'impianto al ritorno. */
+export function pickupKey(r: Pick<Ride, 'direction' | 'destinationId'>): string {
+  return r.direction === 'andata' ? HOTEL_PICKUP : r.destinationId;
+}
+
+export function tripKey(r: TripFields): string {
+  return `${r.serviceDate}|${r.time}|${pickupKey(r)}`;
+}
+
+export interface Trip {
+  key: string;
+  serviceDate: IsoDate;
+  time: HhMm;
+  direction: Direction;
+  pickup: string;
+  rides: Ride[];
+  /** Persone delle corse non annullate. */
+  persons: number;
+}
+
+/** Raggruppa le corse in viaggi (ordine: data, orario, andata prima del ritorno). */
+export function groupTrips(rides: Ride[]): Trip[] {
+  const map = new Map<string, Trip>();
+  for (const r of [...rides].sort((a, b) => a.serviceDate.localeCompare(b.serviceDate) || compareRides(a, b))) {
+    const key = tripKey(r);
+    const trip = map.get(key) ?? { key, serviceDate: r.serviceDate, time: r.time, direction: r.direction, pickup: pickupKey(r), rides: [], persons: 0 };
+    trip.rides.push(r);
+    if (r.status !== 'annullata') trip.persons += r.persons;
+    map.set(key, trip);
+  }
+  return [...map.values()];
+}
+
+/** Viaggi aperti di una data, senza dati delle camere (per l'ospite e per i controlli). */
+export function busySlots(rides: Ride[], date: IsoDate, excludeRideId?: string): BusySlot[] {
+  const map = new Map<string, BusySlot>();
+  for (const r of rides) {
+    if (r.serviceDate !== date || !isOpen(r.status) || r.id === excludeRideId) continue;
+    const pickup = pickupKey(r);
+    const key = `${r.time}|${pickup}`;
+    const slot = map.get(key) ?? { time: r.time, pickup, persons: 0 };
+    slot.persons += r.persons;
+    map.set(key, slot);
+  }
+  return [...map.values()].sort((a, b) => a.time.localeCompare(b.time));
+}
+
+export type TripProblem = 'orario_occupato' | 'posti_esauriti';
+
+type TripRequest = Pick<RideInput, 'time' | 'direction' | 'destinationId' | 'persons'>;
+
+/** Viaggi che impediscono la richiesta: altro viaggio troppo vicino, o lo stesso viaggio già pieno. */
+export function tripClashes(input: TripRequest, busy: BusySlot[], settings: Pick<ShuttleSettings, 'seats' | 'pickupGapMinutes'>): { problem: TripProblem | null; clashes: BusySlot[] } {
+  if (!isValidHhMm(input.time)) return { problem: null, clashes: [] };
+  const pickup = pickupKey(input);
+  const t = toMinutes(input.time);
+  const same = busy.find((b) => b.time === input.time && b.pickup === pickup);
+  if (same && same.persons + input.persons > settings.seats) return { problem: 'posti_esauriti', clashes: [same] };
+  const gap = settings.pickupGapMinutes;
+  const clashes = gap > 0 ? busy.filter((b) => !(b.time === input.time && b.pickup === pickup) && Math.abs(toMinutes(b.time) - t) < gap) : [];
+  return { problem: clashes.length ? 'orario_occupato' : null, clashes };
+}
+
+export function checkTrip(input: TripRequest, busy: BusySlot[], settings: Pick<ShuttleSettings, 'seats' | 'pickupGapMinutes'>): TripProblem | null {
+  return tripClashes(input, busy, settings).problem;
+}
+
+export interface TimeSuggestion {
+  time: HhMm;
+  /** Vero se è un viaggio già previsto dallo stesso punto di ritiro (si viaggia insieme ad altri ospiti). */
+  join: boolean;
+}
+
+/** Orari validi più vicini a quello chiesto: prima i viaggi da condividere, poi gli orari liberi. */
+export function suggestTimes(
+  input: TripRequest & { serviceDate: IsoDate },
+  busy: BusySlot[],
+  settings: ShuttleSettings,
+  nowMs: number,
+  actor: Actor,
+  max = 4,
+): TimeSuggestion[] {
+  const earliest = earliestSlot(settings, nowMs, input.serviceDate, actor);
+  if (!earliest) return [];
+  const lo = toMinutes(earliest);
+  const hi = toMinutes(settings.serviceEnd);
+  const want = isValidHhMm(input.time) ? toMinutes(input.time) : lo;
+  const ok = (m: number) => m >= lo && m <= hi && checkTrip({ ...input, time: fromMinutes(m) }, busy, settings) === null;
+  const pickup = pickupKey(input);
+  const found = new Map<HhMm, TimeSuggestion>();
+  for (const b of busy) {
+    if (b.pickup === pickup && b.time !== input.time && ok(toMinutes(b.time))) found.set(b.time, { time: b.time, join: true });
+  }
+  for (let m = lo; m <= hi; m += SLOT_STEP_MINUTES) {
+    const time = fromMinutes(m);
+    if (m !== want && !found.has(time) && ok(m)) found.set(time, { time, join: false });
+  }
+  return [...found.values()]
+    .sort((a, b) => Math.abs(toMinutes(a.time) - want) - Math.abs(toMinutes(b.time) - want) || Number(b.join) - Number(a.join))
+    .slice(0, max)
+    .sort((a, b) => a.time.localeCompare(b.time));
+}
+
+/**
+ * Corse aperte in conflitto tra loro (viaggi diversi troppo vicini, o viaggio oltre i posti),
+ * per gli avvisi di reception e autista: id della corsa → corse con cui si scontra.
+ */
+export function rideConflicts(rides: Ride[], settings: Pick<ShuttleSettings, 'seats' | 'pickupGapMinutes'>): Map<string, Ride[]> {
+  const open = rides.filter((r) => isOpen(r.status));
+  const out = new Map<string, Ride[]>();
+  const add = (a: Ride, b: Ride) => out.set(a.id, [...(out.get(a.id) ?? []), b]);
+  for (let i = 0; i < open.length; i++) {
+    for (let j = i + 1; j < open.length; j++) {
+      const a = open[i]!;
+      const b = open[j]!;
+      if (a.serviceDate !== b.serviceDate || tripKey(a) === tripKey(b)) continue;
+      if (settings.pickupGapMinutes > 0 && Math.abs(toMinutes(a.time) - toMinutes(b.time)) < settings.pickupGapMinutes) {
+        add(a, b);
+        add(b, a);
+      }
+    }
+  }
+  for (const trip of groupTrips(open)) {
+    if (trip.persons > settings.seats) for (const r of trip.rides) for (const o of trip.rides) if (o !== r) add(r, o);
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -357,6 +503,8 @@ export const PROBLEM_LABEL_IT: Record<RideInputProblem, string> = {
   persone_non_valide: 'Numero di persone non valido.',
   destinazione_non_valida: 'Scegli un impianto.',
   condizioni_non_accettate: 'Accetta le condizioni di attesa.',
+  orario_occupato: 'A quell’ora il mezzo è già impegnato in un altro viaggio.',
+  posti_esauriti: 'Il viaggio a quell’ora è già pieno.',
 };
 
 /** Riga CSV della giornata per la reception (separatore «;» per Excel in italiano). */

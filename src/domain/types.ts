@@ -71,7 +71,20 @@ export interface ShuttleSettings {
   minLeadMinutes: number;
   /** Numero della reception mostrato all'ospite per modifiche dopo la conferma (facoltativo). */
   receptionPhone: string;
+  /**
+   * Minuti minimi tra due viaggi diversi del mezzo (altro punto di ritiro o altro orario).
+   * Lo stesso viaggio (stesso orario e stesso punto di ritiro) accoglie più camere fino ai posti. 0 = nessun controllo.
+   */
+  pickupGapMinutes: number;
   updatedAt: IsoTimestamp;
+}
+
+/** Viaggio già prenotato in una data, senza dati delle camere: serve all'ospite per scegliere un orario libero. */
+export interface BusySlot {
+  time: HhMm;
+  /** Punto di ritiro: "hotel" oppure l'id dell'impianto. */
+  pickup: string;
+  persons: number;
 }
 
 /** Origine dell'abilitazione di una camera allo shuttle. */

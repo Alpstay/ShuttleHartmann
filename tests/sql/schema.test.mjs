@@ -142,6 +142,25 @@ ok(cc.status === 'annullata' && cc.cancelled_by === 'ospite', 'ospite cancella u
 const cev = (await as('authenticated', DEV_R, `select kind, actor from public.shuttle_ride_events where ride_id = $1 order by id`, [rc.id])).rows.map((e) => `${e.kind}:${e.actor}`).join(',');
 ok(cev === 'creata:ospite,messaggio:autista,annullata:ospite', 'cancellazione registrata nello storico');
 
+// --- Il mezzo è uno solo: viaggi alla stessa ora da posti diversi
+const guestRide = (time, dir, dest, persons) =>
+  as('anon', null, `select public.shuttle_guest_create_ride($1::uuid, $2::date, $3::time, $4, $5, $6, null, true) j`, [login.token, tomorrow, time, dir, dest, persons]);
+ok((await guestRide('16:00', 'ritorno', 'seceda', 2)).rows[0].j.status === 'richiesta', 'ritorno da Seceda alle 16:00');
+await expectError(guestRide('16:00', 'ritorno', 'monte-pana', 2), 'non_valida:orario_occupato', 'stessa ora da un altro impianto: rifiutata');
+await expectError(guestRide('16:10', 'ritorno', 'seceda', 2), 'non_valida:orario_occupato', 'stesso impianto 10 minuti dopo: rifiutata (si viaggia insieme alle 16:00)');
+await expectError(guestRide('15:50', 'andata', 'alpe-di-siusi', 2), 'non_valida:orario_occupato', 'andata dall’hotel 10 minuti prima: rifiutata');
+ok((await guestRide('16:00', 'ritorno', 'seceda', 3)).rows[0].j.status === 'richiesta', 'stesso viaggio (ora e impianto): un’altra prenotazione si aggiunge');
+await expectError(guestRide('16:00', 'ritorno', 'seceda', 4), 'non_valida:posti_esauriti', 'stesso viaggio oltre gli 8 posti: rifiutata');
+ok((await guestRide('16:20', 'ritorno', 'monte-pana', 2)).rows[0].j.status === 'richiesta', 'altro impianto a 20 minuti di distanza: ammessa');
+const busy = (await one('anon', null, `select public.shuttle_guest_busy($1::uuid, $2::date) j`, [login.token, tomorrow])).j;
+ok(JSON.stringify(busy) === JSON.stringify([{ time: '16:00', pickup: 'seceda', persons: 5 }, { time: '16:20', pickup: 'monte-pana', persons: 2 }]), `viaggi del giorno per l’ospite, senza camere: ${JSON.stringify(busy)}`);
+const forced = await one('authenticated', DEV_R, `select * from public.shuttle_reception_create_ride('103', null, null, $1::date, '16:05', 'ritorno', 'col-raiser', 2, null)`, [tomorrow]);
+ok(forced.status === 'richiesta', 'la reception può inserire anche un viaggio in conflitto (decide lei, la pagina avvisa)');
+await as('authenticated', DEV_R, `select * from public.shuttle_save_settings('{"pickupGapMinutes":0}'::jsonb)`);
+ok((await guestRide('16:10', 'ritorno', 'alpe-di-siusi', 1)).rows[0].j.status === 'richiesta', 'tempo tra viaggi a 0: controllo spento');
+ok((await one('anon', null, `select public.shuttle_guest_settings($1::uuid) j`, [login.token])).j.pickupGapMinutes === 0, 'l’ospite riceve il tempo tra viaggi');
+await as('authenticated', DEV_R, `select * from public.shuttle_save_settings('{"pickupGapMinutes":20}'::jsonb)`);
+
 // --- Cambio ospite nella stessa camera e partenza anticipata
 await as('authenticated', DEV_R, `select public.shuttle_sync_rooms($1::jsonb, true)`, [JSON.stringify([{ room: '105', reservationId: 'res-105-b', persons: 1, validUntil: tomorrow }])]);
 await expectError(as('anon', null, `select public.shuttle_guest_rides($1::uuid)`, [login.token]), 'sessione_scaduta', 'nuovo ospite in camera: la sessione del precedente si chiude');
@@ -180,9 +199,15 @@ ok((await one('authenticated', DEV_D, `select count(*)::int c from public.shuttl
 const pub = (await db.query(`select tablename from pg_publication_tables where pubname='supabase_realtime' order by 1`)).rows.map((x) => x.tablename).join(',');
 ok(pub === 'shuttle_rides,shuttle_stays', `tabelle in realtime: ${pub}`);
 const exposed = (await db.query(`select p.proname from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname='public' and p.proname like 'shuttle%' and has_function_privilege('anon', p.oid, 'execute') order by 1`)).rows.map((x) => x.proname).join(',');
-ok(exposed === 'shuttle_guest_cancel_ride,shuttle_guest_create_ride,shuttle_guest_login,shuttle_guest_rides,shuttle_guest_settings', `funzioni eseguibili da anonimo: ${exposed}`);
+ok(exposed === 'shuttle_guest_busy,shuttle_guest_cancel_ride,shuttle_guest_create_ride,shuttle_guest_login,shuttle_guest_rides,shuttle_guest_settings', `funzioni eseguibili da anonimo: ${exposed}`);
 const adminExposed = (await db.query(`select has_function_privilege('authenticated', 'public.shuttle_admin_set_pin(text,text)', 'execute') x`)).rows[0].x;
 ok(adminExposed === false, 'shuttle_admin_set_pin non eseguibile dall’app');
+
+// --- Lo schema si può rieseguire su un database in uso (aggiornamenti): impostazioni e corse restano
+const before = (await db.query(`select destinations::text d, pickup_gap_minutes g, (select count(*)::int from public.shuttle_rides) n from public.shuttle_settings`)).rows[0];
+await db.exec(readFileSync(schemaPath, 'utf8'));
+const after = (await db.query(`select destinations::text d, pickup_gap_minutes g, (select count(*)::int from public.shuttle_rides) n from public.shuttle_settings`)).rows[0];
+ok(before.d === after.d && before.g === after.g && before.n === after.n, 'schema rieseguibile senza perdere impostazioni e corse');
 
 console.log(failures ? `\n${failures} FALLITI` : '\nTutti i controlli SQL superati');
 process.exit(failures ? 1 : 0);

@@ -3,7 +3,7 @@
  * funzioni RPC; l'ospite usa esclusivamente le funzioni shuttle_guest_* con il token di sessione.
  */
 import { createClient, type RealtimeChannel, type SupabaseClient } from '@supabase/supabase-js';
-import { compareRides } from '../domain/rules';
+import { DEFAULT_SETTINGS, compareRides } from '../domain/rules';
 import type {
   Actor,
   ChargeDecision,
@@ -76,6 +76,7 @@ interface SettingsRow {
   service_end: string;
   min_lead_minutes: number;
   reception_phone: string;
+  pickup_gap_minutes?: number;
   updated_at: string;
 }
 
@@ -146,6 +147,7 @@ function settingsFromRow(s: SettingsRow): ShuttleSettings {
     serviceEnd: hhmm(s.service_end),
     minLeadMinutes: s.min_lead_minutes,
     receptionPhone: s.reception_phone,
+    pickupGapMinutes: s.pickup_gap_minutes ?? DEFAULT_SETTINGS.pickupGapMinutes,
     updatedAt: s.updated_at,
   };
 }
@@ -287,6 +289,7 @@ export function createSupabaseBackend(url: string, anonKey: string): ShuttleBack
           serviceEnd: settings.serviceEnd,
           minLeadMinutes: settings.minLeadMinutes,
           receptionPhone: settings.receptionPhone,
+          pickupGapMinutes: settings.pickupGapMinutes,
         },
       });
       return settingsFromRow(row);
@@ -379,8 +382,20 @@ export function createSupabaseBackend(url: string, anonKey: string): ShuttleBack
       if (res.error) throw new ShuttleError(res.error, res.error);
       return { token: res.token, stayId: res.stay_id, room: res.room, persons: res.persons, validUntil: res.valid_until } satisfies GuestSession;
     },
-    settings: async (token) => rpc<ShuttleSettings>(client, 'shuttle_guest_settings', { p_token: token }),
+    settings: async (token) => {
+      const s = await rpc<ShuttleSettings>(client, 'shuttle_guest_settings', { p_token: token });
+      return { ...s, pickupGapMinutes: s.pickupGapMinutes ?? DEFAULT_SETTINGS.pickupGapMinutes };
+    },
     rides: async (token) => (await rpc<RideRow[]>(client, 'shuttle_guest_rides', { p_token: token })).map(rideFromRow),
+    async busy(token, date) {
+      try {
+        const rows = await rpc<{ time: string; pickup: string; persons: number }[] | null>(client, 'shuttle_guest_busy', { p_token: token, p_date: date });
+        return (rows ?? []).map((b) => ({ time: hhmm(b.time), pickup: b.pickup, persons: b.persons }));
+      } catch (e) {
+        if ((e as ShuttleError).code === 'sessione_scaduta') throw e;
+        return []; // database non ancora aggiornato: il controllo resta alla reception
+      }
+    },
     async createRide(token, input: RideInput) {
       const row = await rpc<RideRow>(client, 'shuttle_guest_create_ride', {
         p_token: token,

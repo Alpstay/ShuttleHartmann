@@ -36,12 +36,16 @@ create table if not exists public.shuttle_settings (
   check (jsonb_typeof(rooms) = 'array')
 );
 
+-- Aggiunte successive (lo script resta rieseguibile su un database già in uso).
+alter table public.shuttle_settings
+  add column if not exists pickup_gap_minutes int not null default 20 check (pickup_gap_minutes between 0 and 120);
+
 insert into public.shuttle_settings (id, destinations)
 values (1, '[
   {"id":"seceda","name":"Seceda","place":"Ortisei","active":true},
   {"id":"alpe-di-siusi","name":"Alpe di Siusi","place":"Ortisei","active":true},
-  {"id":"resciesa","name":"Resciesa","place":"Ortisei","active":true},
-  {"id":"col-raiser","name":"Col Raiser","place":"S. Cristina","active":true},
+  {"id":"palmer","name":"Palmer (Campetti scuola)","place":"Ortisei","active":true},
+  {"id":"col-raiser","name":"Col Raiser (Gardena Ronda/Saslong)","place":"S. Cristina","active":true},
   {"id":"monte-pana","name":"Monte Pana","place":"S. Cristina","active":true}
 ]'::jsonb)
 on conflict (id) do nothing;
@@ -287,6 +291,43 @@ begin
 end
 $$;
 
+-- Il mezzo è uno solo (stesse regole di checkTrip() in src/domain/rules.ts): un viaggio = stessa data,
+-- stesso orario, stesso punto di ritiro (hotel all'andata, impianto al ritorno) e accoglie più camere fino
+-- ai posti; due viaggi diversi devono stare ad almeno pickup_gap_minutes di distanza.
+create or replace function public.shuttle_trip_problem(
+  p_date date, p_time time, p_direction text, p_destination text, p_persons int
+)
+returns text
+language plpgsql stable
+set search_path = public, pg_temp
+as $$
+declare
+  s    public.shuttle_settings;
+  pick text := case when p_direction = 'andata' then 'hotel' else p_destination end;
+  same int;
+begin
+  select * into s from public.shuttle_settings where id = 1;
+  select coalesce(sum(r.persons), 0) into same
+    from public.shuttle_rides r
+   where r.service_date = p_date and r.ride_time = p_time
+     and r.status in ('richiesta', 'confermata', 'sul_posto')
+     and (case when r.direction = 'andata' then 'hotel' else r.destination_id end) = pick;
+  if same > 0 and same + p_persons > s.seats then
+    return 'posti_esauriti';
+  end if;
+  if s.pickup_gap_minutes > 0 and exists (
+    select 1 from public.shuttle_rides r
+     where r.service_date = p_date
+       and r.status in ('richiesta', 'confermata', 'sul_posto')
+       and not (r.ride_time = p_time and (case when r.direction = 'andata' then 'hotel' else r.destination_id end) = pick)
+       and abs(extract(epoch from (r.ride_time - p_time))) / 60 < s.pickup_gap_minutes
+  ) then
+    return 'orario_occupato';
+  end if;
+  return null;
+end
+$$;
+
 -- Hash del PIN dello staff (SHA-256 con sale casuale). Un PIN di 4 cifre resta indovinabile per
 -- tentativi: per questo i tentativi sono limitati in shuttle_staff_login.
 create or replace function public.shuttle_pin_hash(p_salt text, p_pin text)
@@ -362,6 +403,7 @@ begin
     service_end      = coalesce((p ->> 'serviceEnd')::time, service_end),
     min_lead_minutes = coalesce((p ->> 'minLeadMinutes')::int, min_lead_minutes),
     reception_phone  = coalesce(p ->> 'receptionPhone', reception_phone),
+    pickup_gap_minutes = coalesce((p ->> 'pickupGapMinutes')::int, pickup_gap_minutes),
     updated_at       = now()
   where id = 1
   returning * into s;
@@ -809,7 +851,8 @@ begin
   return json_build_object(
     'destinations', s.destinations, 'seats', s.seats, 'waitMinutes', s.wait_minutes,
     'serviceStart', to_char(s.service_start, 'HH24:MI'), 'serviceEnd', to_char(s.service_end, 'HH24:MI'),
-    'minLeadMinutes', s.min_lead_minutes, 'receptionPhone', s.reception_phone, 'updatedAt', s.updated_at);
+    'minLeadMinutes', s.min_lead_minutes, 'receptionPhone', s.reception_phone,
+    'pickupGapMinutes', s.pickup_gap_minutes, 'updatedAt', s.updated_at);
 end
 $$;
 
@@ -829,6 +872,27 @@ begin
 end
 $$;
 
+-- Viaggi già prenotati in una data, senza camere: l'ospite sceglie un orario libero.
+create or replace function public.shuttle_guest_busy(p_token uuid, p_date date)
+returns json
+language plpgsql security definer
+set search_path = public, pg_temp
+as $$
+begin
+  perform public.shuttle_guest_stay(p_token);
+  return coalesce((
+    select json_agg(json_build_object('time', to_char(t.ride_time, 'HH24:MI'), 'pickup', t.pickup, 'persons', t.persons)
+                    order by t.ride_time, t.pickup)
+      from (select r.ride_time,
+                   case when r.direction = 'andata' then 'hotel' else r.destination_id end as pickup,
+                   sum(r.persons)::int as persons
+              from public.shuttle_rides r
+             where r.service_date = p_date and r.status in ('richiesta', 'confermata', 'sul_posto')
+             group by 1, 2) t
+  ), '[]'::json);
+end
+$$;
+
 create or replace function public.shuttle_guest_create_ride(
   p_token uuid, p_date date, p_time time, p_direction text, p_destination text,
   p_persons int, p_note text, p_conditions boolean
@@ -840,6 +904,7 @@ as $$
 declare
   st    public.shuttle_stays := public.shuttle_guest_stay(p_token);
   probs text[];
+  trip  text;
   r     public.shuttle_rides;
 begin
   if p_direction not in ('andata', 'ritorno') then
@@ -849,6 +914,12 @@ begin
                                         'ospite', st.valid_from, st.valid_until);
   if cardinality(probs) > 0 then
     raise exception 'non_valida:%', array_to_string(probs, ',') using errcode = 'P0001';
+  end if;
+  -- Un ospite alla volta per giorno: due prenotazioni contemporanee non possono superare il controllo insieme.
+  perform pg_advisory_xact_lock(hashtext('shuttle_trip_' || p_date::text));
+  trip := public.shuttle_trip_problem(p_date, p_time, p_direction, p_destination, p_persons);
+  if trip is not null then
+    raise exception 'non_valida:%', trip using errcode = 'P0001';
   end if;
   insert into public.shuttle_rides (stay_id, room, reservation_id, service_date, ride_time, direction,
                                     destination_id, destination_name, persons, note, created_by,
@@ -891,7 +962,7 @@ do $$
 declare
   f record;
   guest_fns text[] := array['shuttle_guest_login', 'shuttle_guest_settings', 'shuttle_guest_rides',
-                            'shuttle_guest_create_ride', 'shuttle_guest_cancel_ride'];
+                            'shuttle_guest_busy', 'shuttle_guest_create_ride', 'shuttle_guest_cancel_ride'];
   staff_fns text[] := array['shuttle_role', 'shuttle_save_settings', 'shuttle_enable_room', 'shuttle_sync_rooms',
                             'shuttle_revoke_stay', 'shuttle_staff_login', 'shuttle_staff_logout', 'shuttle_set_pin',
                             'shuttle_staff_devices', 'shuttle_disconnect',

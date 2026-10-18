@@ -1,9 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowDownLeft, ArrowLeft, ArrowUpRight, Bell, BellOff, Check, Clock, LogOut, Mountain, Plus, Users, WifiOff, X } from 'lucide-react';
+import { AlertTriangle, ArrowDownLeft, ArrowLeft, ArrowUpRight, Bell, BellOff, Check, Clock, Globe, LogOut, Mountain, Plus, Users, WifiOff, X } from 'lucide-react';
 import { GUEST_STRINGS, LANGS, detectLang, type GuestStrings, type Lang } from '../domain/i18n';
-import { canGuestCancel, compareRides, earliestSlot, isOpen, suggestedTime, validateRideInput, type RideInputProblem } from '../domain/rules';
-import { addDays, formatShortDate, romeDate, romeTime, romeTimeOf } from '../domain/time';
-import type { Direction, GuestSession, IsoDate, Ride, RideInput, ShuttleSettings } from '../domain/types';
+import { canGuestCancel, compareRides, earliestSlot, isOpen, suggestTimes, suggestedTime, tripClashes, validateRideInput, type RideInputProblem } from '../domain/rules';
+import { addDays, formatShortDate, romeDate, romeTime, romeTimeOf, toMinutes } from '../domain/time';
+import type { BusySlot, Direction, GuestSession, IsoDate, Ride, RideInput, ShuttleSettings } from '../domain/types';
 import { ShuttleError } from '../domain/types';
 import { Button, Countdown, InlineConfirm, Pill, STATUS_TONE, Stepper, chime, cx, unlockSound, useApp, useLocalState, useNow, useOnline, useToast } from '../ui/kit';
 import { AlpstayLogo } from '../ui/Logo';
@@ -60,7 +60,7 @@ export function GuestView({ autoLogin, onAutoLoginUsed, sessionKey = 'shuttle-ha
 
   if (!session) {
     return (
-      <div className="flex min-h-full flex-col bg-bg">
+      <GuestShell>
         <header className="flex justify-end px-4 pt-4">{langSwitch}</header>
         <div className="flex flex-col items-center gap-4 px-4 pb-2 text-center">
           <AlpstayLogo variant="completo" title="AlpStay · Be free. Stay true" className="h-auto w-48 text-fg" />
@@ -70,21 +70,20 @@ export function GuestView({ autoLogin, onAutoLoginUsed, sessionKey = 'shuttle-ha
           </div>
         </div>
         <GuestLogin t={t} error={loginError} onLogin={login} />
-      </div>
+      </GuestShell>
     );
   }
 
   // In alto c'è poco spazio sul telefono: un solo pulsante che passa da una lingua all'altra.
   const langCycle = (
-    <Button
-      size="sm"
-      tone="soft"
+    <HeaderButton
+      label={lang.toUpperCase()}
       aria-label={`Lingua · Sprache · Language: ${lang.toUpperCase()}`}
+      title={t.languageShort}
       onClick={() => setLang(LANGS[(LANGS.findIndex((l) => l.code === lang) + 1) % LANGS.length]!.code)}
-      className="min-w-11 font-bold"
     >
-      {lang.toUpperCase()}
-    </Button>
+      <Globe size={22} aria-hidden />
+    </HeaderButton>
   );
 
   return <GuestHome t={t} session={session} langSwitch={langCycle} onLogout={() => setSession(null)} onExpired={() => (setSession(null), setLoginError(t.loginError))} />;
@@ -110,6 +109,35 @@ function GuestLogin({ t, error, onLogin }: { t: GuestStrings; error: string | nu
         }}
       />
     </main>
+  );
+}
+
+/**
+ * Colonna dell'area ospite: a tutta larghezza sul telefono, centrata e di larghezza comoda su tablet e computer
+ * (container query: funziona anche dentro i riquadri del prototipo).
+ */
+function GuestShell({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="@container flex min-h-full flex-col bg-bg">
+      <div className="mx-auto flex w-full max-w-xl flex-1 flex-col @2xl:border-x @2xl:border-line">{children}</div>
+    </div>
+  );
+}
+
+/** Pulsante dell'intestazione: icona grande con la sua parola sotto, area da toccare di almeno 56 px. */
+function HeaderButton({ label, active, children, ...rest }: React.ButtonHTMLAttributes<HTMLButtonElement> & { label: string; active?: boolean }) {
+  return (
+    <button
+      type="button"
+      {...rest}
+      className={cx(
+        'flex min-h-14 min-w-14 flex-col items-center justify-center gap-0.5 rounded-2xl px-1.5 text-[0.7rem] font-black uppercase tracking-wide transition-transform active:scale-[0.96]',
+        active ? 'bg-fg text-bg' : 'border border-line bg-surface text-fg',
+      )}
+    >
+      {children}
+      <span className="leading-none">{label}</span>
+    </button>
   );
 }
 
@@ -217,34 +245,36 @@ function GuestHome({ t, session, langSwitch, onLogout, onExpired }: { t: GuestSt
   }
 
   return (
-    <div className="flex min-h-full flex-col bg-bg">
-      <header className="flex items-center gap-2 px-4 pb-2 pt-4">
-        <AlpstayLogo variant="simbolo" className="h-8 w-auto shrink-0" />
-        {/* Il numero di camera non si accorcia mai: sui telefoni stretti si accorcia il nome dell'hotel. */}
-        <div className="mr-auto">
-          <p className="eyebrow truncate [contain:inline-size]">{t.hotel}</p>
-          <h1 className="tnum whitespace-nowrap font-title text-[1.6rem] leading-tight">{t.roomLabel(session.room)}</h1>
+    <GuestShell>
+      {/* Due righe: in alto logo e pulsanti grandi con la loro parola, sotto il numero di camera ben visibile. */}
+      <header className="flex flex-col gap-2 px-4 pb-2 pt-3">
+        <div className="flex items-center gap-2">
+          <AlpstayLogo variant="simbolo" className="mr-auto h-10 w-auto shrink-0" />
+          <HeaderButton
+            label={t.soundShort}
+            active={sound}
+            aria-pressed={sound}
+            aria-label={sound ? t.soundOn : t.soundOff}
+            title={sound ? t.soundOn : t.soundOff}
+            onClick={() => {
+              if (!sound) {
+                unlockSound();
+                chime('aggiornamento');
+              }
+              setSound(!sound);
+            }}
+          >
+            {sound ? <Bell size={22} aria-hidden /> : <BellOff size={22} aria-hidden />}
+          </HeaderButton>
+          {langSwitch}
+          <HeaderButton label={t.logout} aria-label={t.logout} title={t.logout} onClick={onLogout}>
+            <LogOut size={22} aria-hidden />
+          </HeaderButton>
         </div>
-        <Button
-          size="sm"
-          tone={sound ? 'dark' : 'soft'}
-          aria-pressed={sound}
-          aria-label={sound ? t.soundOn : t.soundOff}
-          title={sound ? t.soundOn : t.soundOff}
-          onClick={() => {
-            if (!sound) {
-              unlockSound();
-              chime('aggiornamento');
-            }
-            setSound(!sound);
-          }}
-        >
-          {sound ? <Bell size={16} /> : <BellOff size={16} />}
-        </Button>
-        {langSwitch}
-        <Button size="sm" tone="ghost" aria-label={t.logout} title={t.logout} onClick={onLogout}>
-          <LogOut size={16} />
-        </Button>
+        <div>
+          <p className="eyebrow">{t.hotel}</p>
+          <h1 className="tnum font-title text-[2rem] leading-tight">{t.roomLabel(session.room)}</h1>
+        </div>
       </header>
       {toast}
       {!online ? (
@@ -282,7 +312,7 @@ function GuestHome({ t, session, langSwitch, onLogout, onExpired }: { t: GuestSt
           <Plus size={22} /> {t.newRide}
         </Button>
       </BottomBar>
-    </div>
+    </GuestShell>
   );
 }
 
@@ -416,18 +446,48 @@ function BookingWizard({
   const [noteOpen, setNoteOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [serverProblems, setServerProblems] = useState<RideInputProblem[]>([]);
+  // Viaggi già prenotati quel giorno (solo orario, punto di ritiro e persone): il mezzo è uno solo.
+  const [taken, setTaken] = useState<BusySlot[]>([]);
+  // Vero finché l'orario è quello proposto dall'app: se è occupato, si sposta da solo al più vicino libero.
+  const [timeAuto, setTimeAuto] = useState(true);
+  const onErrorRef = useRef(onError);
+  onErrorRef.current = onError;
 
   const earliest = earliestSlot(settings, now, date, 'ospite');
   const pickDate = (d: IsoDate) => {
     setDate(d);
     setTime(suggestedTime(settings, now, d, direction, 'ospite') ?? '');
+    setTimeAuto(true);
   };
+  const pickTime = (v: string) => {
+    setTime(v);
+    setTimeAuto(false);
+  };
+
+  const loadTaken = useCallback(() => backend.guest.busy(session.token, date).then(setTaken, (e: unknown) => onErrorRef.current(e)), [backend, session.token, date]);
+  useEffect(() => {
+    if (step >= 3) void loadTaken();
+  }, [step, loadTaken]);
   useEffect(() => {
     if (!time) setTime(suggestedTime(settings, now, date, direction, 'ospite') ?? '');
   }, [time, settings, now, date, direction]);
 
   const input: RideInput = { serviceDate: date, time, direction, destinationId, persons, note: note.trim() || null, conditionsAccepted: true };
   const problems = validateRideInput(input, { settings, nowMs: now, actor: 'ospite', stay: { validFrom: today, validUntil: session.validUntil } });
+  const trip = time ? tripClashes(input, taken, settings) : { problem: null, clashes: [] };
+  const suggestions = trip.problem ? suggestTimes(input, taken, settings, now, 'ospite') : [];
+
+  // Orario proposto dall'app ma già occupato: passa al più vicino disponibile (preferendo un viaggio da condividere).
+  useEffect(() => {
+    if (!timeAuto || !time) return;
+    const best = suggestions
+      .map((s) => ({ s, d: Math.abs(toMinutes(s.time) - toMinutes(time)) - (s.join ? 1 : 0) }))
+      .sort((a, b) => a.d - b.d)[0];
+    if (best) setTime(best.s.time);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- solo quando arrivano i viaggi del giorno
+  }, [taken]);
+  useEffect(() => setServerProblems([]), [time, date, persons, destinationId, direction]);
+  const allProblems = [...new Set<RideInputProblem>([...problems, ...(trip.problem ? [trip.problem] : []), ...serverProblems])];
   const timeProblems = problems.filter((p) => p === 'troppo_presto' || p === 'fuori_orario_servizio' || p === 'orario_non_valido' || p === 'data_non_valida' || p === 'data_fuori_soggiorno' || p === 'data_troppo_lontana');
   const dest = settings.destinations.find((d) => d.id === destinationId);
   const total = 4;
@@ -440,8 +500,14 @@ function BookingWizard({
       await onBooked();
     } catch (e) {
       const codes = ((e as Error).message ?? '').split(',').filter((c): c is RideInputProblem => c in t.problems);
-      if ((e as ShuttleError).code === 'non_valida' && codes.length) setServerProblems(codes);
-      else onError(e);
+      if ((e as ShuttleError).code === 'non_valida' && codes.length) {
+        // Un altro ospite ha appena preso quell'orario: si torna alla scelta con gli orari aggiornati.
+        if (codes.some((c) => c === 'orario_occupato' || c === 'posti_esauriti')) {
+          setStep(3);
+          await loadTaken();
+        }
+        setServerProblems(codes);
+      } else onError(e);
     } finally {
       setBusy(false);
     }
@@ -450,7 +516,7 @@ function BookingWizard({
   const titles = [t.whereTo, direction === 'andata' ? t.whichLift : t.fromWhichLift, t.whenWho, t.summary];
 
   return (
-    <div className="flex min-h-full flex-col bg-bg">
+    <GuestShell>
       <header className="flex items-center gap-2 px-2 pb-1 pt-3">
         {step > 1 ? (
           <Button size="md" tone="ghost" aria-label={t.back} onClick={() => setStep(step - 1)}>
@@ -486,6 +552,7 @@ function BookingWizard({
                 onClick={() => {
                   setDirection(d);
                   setTime(suggestedTime(settings, now, date, d, 'ospite') ?? '');
+                  setTimeAuto(true);
                   setStep(2);
                 }}
                 className={cx('flex min-h-24 items-center gap-4 rounded-2xl border p-4 text-left active:scale-[0.99]', direction === d && destinationId ? 'border-gold bg-gold-soft' : 'border-line')}
@@ -556,13 +623,41 @@ function BookingWizard({
                 min={earliest ?? settings.serviceStart}
                 max={settings.serviceEnd}
                 value={time}
-                onChange={(e) => setTime(e.target.value)}
+                onChange={(e) => pickTime(e.target.value)}
                 className="tnum h-16 w-full rounded-2xl border border-line bg-bg px-4 text-center font-title text-4xl"
               />
               <p className="mt-1.5 text-sm text-muted">
                 {earliest ?? settings.serviceStart}–{settings.serviceEnd}
               </p>
             </div>
+            {time && trip.problem && !timeProblems.length ? (
+              <div role="alert" className="-mt-2 flex flex-col gap-3 rounded-2xl border-2 border-warn bg-warn-soft p-4">
+                <p className="flex items-start gap-2 font-bold text-warn">
+                  <AlertTriangle size={20} className="mt-0.5 shrink-0" aria-hidden />
+                  {trip.problem === 'posti_esauriti' ? t.fullTitle : t.busyTitle}
+                </p>
+                {suggestions.length ? (
+                  <>
+                    <p className="text-sm">{t.busyHint}</p>
+                    <div className="flex flex-wrap gap-2" aria-label={t.freeTimes}>
+                      {suggestions.map((s) => (
+                        <button
+                          key={s.time}
+                          type="button"
+                          onClick={() => pickTime(s.time)}
+                          className="flex min-h-12 min-w-20 flex-col items-center justify-center rounded-xl border border-line bg-bg px-3 py-1 font-bold active:scale-[0.97]"
+                        >
+                          <span className="tnum text-lg leading-tight">{s.time}</span>
+                          {s.join ? <span className="text-[0.7rem] leading-tight text-muted">{t.joinTrip}</span> : null}
+                        </button>
+                      ))}
+                    </div>
+                  </>
+                ) : (
+                  <p className="text-sm">{t.noFreeTimes}</p>
+                )}
+              </div>
+            ) : null}
             <div>
               <p className="eyebrow mb-1.5">{t.persons}</p>
               <Stepper label={t.persons} value={persons} min={1} max={settings.seats} onChange={setPersons} />
@@ -611,9 +706,9 @@ function BookingWizard({
 
             <p className="rounded-2xl bg-surface p-4 text-sm leading-relaxed">{t.conditions(settings.waitMinutes)}</p>
 
-            {[...new Set([...problems, ...serverProblems])].length ? (
+            {allProblems.length ? (
               <ul role="alert" className="flex flex-col gap-1 rounded-xl bg-bad-soft p-3 text-sm font-bold text-bad">
-                {[...new Set([...problems, ...serverProblems])].map((p) => (
+                {allProblems.map((p) => (
                   <li key={p}>{t.problems[p]}</li>
                 ))}
               </ul>
@@ -625,16 +720,16 @@ function BookingWizard({
       {step >= 3 ? (
         <BottomBar>
           {step === 3 ? (
-            <Button tone="dark" size="xl" className="w-full" disabled={!time || timeProblems.length > 0} onClick={() => setStep(4)}>
+            <Button tone="dark" size="xl" className="w-full" disabled={!time || timeProblems.length > 0 || !!trip.problem} onClick={() => setStep(4)}>
               {t.next}
             </Button>
           ) : (
-            <Button tone="gold" size="xl" className="w-full" disabled={busy || problems.length > 0} onClick={() => void book()}>
+            <Button tone="gold" size="xl" className="w-full" disabled={busy || allProblems.length > 0} onClick={() => void book()}>
               <Check size={22} /> {busy ? t.sending : t.acceptAndBook}
             </Button>
           )}
         </BottomBar>
       ) : null}
-    </div>
+    </GuestShell>
   );
 }

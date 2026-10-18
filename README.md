@@ -28,11 +28,19 @@ Pagina: `https://alpstay.github.io/ShuttleHartmann/` (GitHub Pages, file unico `
    prenoto» (attesa massima 5 minuti, la corsa non utilizzata può essere addebitata). Con «Cancella corsa»
    può cancellare finché l'autista non l'ha avvisato di essere arrivato: autista e reception ricevono subito
    un avviso con suono. Dopo l'arrivo dell'autista cancella solo la reception.
-3. **Autista** (telefono) tocca «Inizia il turno» (suono degli avvisi e schermo sempre acceso) e vede una
-   corsa alla volta a tutto schermo, le successive in un elenco compatto. Conferma la lettura con uno dei tre
-   pulsanti, che avvisano subito l'ospite: *Avvisa l'ospite che sei arrivato* · *Avvisa l'ospite: arrivo fra
-   7 minuti* · *Avvisa l'ospite: c'è traffico*. Dopo l'avviso di arrivo restano solo l'attesa di 5 minuti e **Fatto!** per
-   la consegna; trascorsa l'attesa compare *Ospite non presentato · riparto*.
+   Pagina a colonna unica: a tutta larghezza sul telefono, centrata su tablet e computer; in alto pulsanti
+   grandi con la loro parola (*Avvisi*, lingua, *Esci*) e sotto il numero di camera.
+   **Il mezzo è uno solo**: se all'orario scelto la navetta è già impegnata (un altro impianto, o un altro
+   orario a meno di 20 minuti) l'orario è bloccato e compaiono gli orari liberi più vicini, compreso il
+   viaggio già previsto dallo stesso punto («con altri ospiti»). Il controllo si ripete sul server.
+3. **Autista** (telefono, grafica ad alto contrasto: verde, schede crema, caratteri pieni, un colore per
+   impianto) tocca «Inizia il turno» (suono degli avvisi e schermo sempre acceso) e vede un **viaggio** alla
+   volta: le camere con lo stesso orario e lo stesso punto di ritiro sono un unico viaggio, con ritiro e
+   arrivo in etichette colorate e l'elenco delle camere. Conferma la lettura con uno dei tre pulsanti, che
+   avvisano subito tutte le camere del viaggio: *Avvisa l'ospite che sei arrivato* · *arrivo fra 7 minuti* ·
+   *c'è traffico*. Dopo l'avviso di arrivo restano l'attesa di 5 minuti e **Fatto!** (con più camere:
+   *A bordo* per ognuna e *Fatto! Tutti a bordo*); trascorsa l'attesa compare *non presentato*.
+   Due viaggi nella stessa fascia in posti diversi (inseriti dalla reception) sono segnalati in arancio.
    **7 minuti prima dell'orario** suona l'avviso «Parti ora» (suono e vibrazione, una volta per corsa) e il
    luogo del pick-up lampeggia (Hotel all'andata, l'impianto al ritorno) con il tempo che manca, finché
    l'autista non avvisa l'ospite di essere arrivato. Oltre 30 minuti di ritardo smette: è una corsa rimasta
@@ -44,6 +52,8 @@ Pagina: `https://alpstay.github.io/ShuttleHartmann/` (GitHub Pages, file unico `
    *Nessun addebito*, cancellata dall'ospite con l'orario). Quando un ospite cancella compare un avviso
    con suono. Toccando una corsa si aprono lo storico (chi, cosa, a che ora) e *Annulla*;
    toccando il numero di camera si aprono QR, attivazione dello shuttle e *Corsa per la camera*.
+   Le corse in viaggi sovrapposti mostrano *Mezzo già impegnato* con l'altra camera. Nella nuova corsa la
+   reception vede l'avviso e gli orari liberi, ma può inserire comunque (per esempio con un taxi).
 
 ## Architettura
 
@@ -91,8 +101,15 @@ GitHub Pages  index.html ◀── reception (password presenze, rilettura ogni 
 - **Camere**: elenco delle camere (numero come in Slope), aggiungi o togli.
 - **Impianti**: nome, località, attivo o no. Le modifiche arrivano agli ospiti al successivo
   aggiornamento della pagina (e comunque all'apertura di «Prenota una corsa») e all'autista entro un minuto.
-- **Servizio**: posti sul mezzo, attesa massima, anticipo minimo, prima e ultima corsa.
+- **Servizio**: posti sul mezzo, attesa massima, anticipo minimo, **tempo tra due viaggi del mezzo**
+  (20 minuti; 0 = nessun controllo), prima e ultima corsa.
 - **Ospiti**: telefono reception mostrato all'ospite e anteprima delle condizioni in IT/DE/EN.
+
+## Aggiornare il database già in uso
+
+`supabase/schema.sql` si può rieseguire su un database in uso: impostazioni, corse e PIN restano. Dopo un
+aggiornamento del codice: SQL Editor → incolla ed esegui di nuovo tutto `schema.sql`. Le modifiche ai dati
+iniziali si fanno con script a parte, da eseguire una volta (es. `supabase/aggiorna-impianti-2026-10.sql`).
 
 ## Sviluppo
 
@@ -124,5 +141,6 @@ colore del testo per la modalità scura) nelle varianti `completo`, `nome` e `si
 - L'avviso «Parti ora» scatta 7 minuti prima per tutti gli impianti (`DEPART_ALERT_MINUTES` in
   `src/domain/rules.ts`). Per Col Raiser e Monte Pana (S. Cristina) il tragitto dall'hotel è più lungo:
   se serve, il passo successivo è un anticipo per impianto nelle *Impostazioni*.
-- Gli impianti iniziali (Seceda, Alpe di Siusi, Resciesa, Col Raiser, Monte Pana) si modificano da
+- Gli impianti iniziali (Seceda, Alpe di Siusi, Palmer (Campetti scuola), Col Raiser (Gardena Ronda/Saslong),
+  Monte Pana) si modificano da
   *Impostazioni*, come posti del mezzo, attesa massima, orari e anticipo minimo.

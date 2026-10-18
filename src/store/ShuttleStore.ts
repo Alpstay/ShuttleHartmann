@@ -1,4 +1,5 @@
 import type {
+  BusySlot,
   ChargeDecision,
   DriverMessageKind,
   GuestSession,
@@ -76,6 +77,8 @@ export interface GuestApi {
   login(room: string): Promise<GuestSession>;
   settings(token: string): Promise<ShuttleSettings>;
   rides(token: string): Promise<Ride[]>;
+  /** Viaggi già prenotati in una data (orario, punto di ritiro, persone), senza dati delle camere. */
+  busy(token: string, date: IsoDate): Promise<BusySlot[]>;
   createRide(token: string, input: RideInput): Promise<Ride>;
   cancelRide(token: string, rideId: string): Promise<Ride>;
 }

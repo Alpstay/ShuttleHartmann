@@ -99,6 +99,13 @@
 
 /* Stili di base nei layer di Tailwind: le classi di utilità (es. whitespace-nowrap su un titolo) li possono sovrascrivere. */
 @layer base {
+  /* Altezza piena: la barra in fondo all'area ospite resta in basso anche con poche righe. */
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
   html,
   body {
     background: var(--bg);
@@ -119,6 +126,11 @@
 @layer components {
   .tnum {
     font-variant-numeric: tabular-nums;
+  }
+
+  /* Testo pieno (Lato) anche sui titoli: usato nell'area autista, dove conta la leggibilità. */
+  .font-text {
+    font-family: var(--font-text);
   }
 
   .eyebrow {
@@ -184,6 +196,33 @@
   .blink-place {
     animation: none;
   }
+}
+
+/* Area autista: grafica ad alto contrasto e di facile lettura (verde alpino, schede color crema,
+   caratteri pieni, un colore per impianto). Colori fissi, uguali con tema chiaro e scuro. */
+.driver-theme {
+  --d-bg: #0d4a3e;
+  --d-bg-2: #0a3c32;
+  --d-card: #fbf6ee;
+  --d-card-2: #efe6d6;
+  --d-ink: #15201c;
+  --d-ink-soft: #5b574f;
+  --d-cream: #fbf6ee;
+  --d-on-bg-soft: #b8d4cb;
+  --d-primary: #0f7a60;
+  --d-ok: #1c7f47;
+  --d-bad: #b23a2a;
+  --d-warn: #e8892b;
+  background: var(--d-bg);
+  color: var(--d-cream);
+  color-scheme: dark;
+}
+
+/* «Parti ora»: arancio e crema, alternati una volta al secondo. */
+.driver-theme .blink-place {
+  --warn: #e8892b;
+  --warn-soft: #fbf6ee;
+  --bg: #15201c;
 }
 
 /* Stampa del cartoncino PIN (solo produzione): si stampa solo l'elemento marcato. */

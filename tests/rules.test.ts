@@ -5,10 +5,15 @@ import {
   applyDone,
   applyDriverMessage,
   applyNoShow,
+  busySlots,
+  checkTrip,
   departLabel,
   departState,
   earliestSlot,
   groupBySlot,
+  groupTrips,
+  rideConflicts,
+  suggestTimes,
   normalizeRoom,
   pickupPlace,
   ridesToCsv,
@@ -222,5 +227,58 @@ describe('viste reception', () => {
     expect(csv.split('\r\n')[0]).toContain('Camera;Persone');
     expect(csv).toContain('"sci; scarponi"');
     expect(csv).toContain('1f1c70fe-e193-6742-9f9d-13b1b916a116');
+  });
+});
+
+describe('il mezzo è uno solo: viaggi', () => {
+  const S = { ...DEFAULT_SETTINGS, seats: 8, pickupGapMinutes: 20 };
+  const r = (id: string, time: string, direction: 'andata' | 'ritorno', destinationId: string, persons = 2, status: Ride['status'] = 'richiesta'): Ride =>
+    ride({ id, time, direction, destinationId, destinationName: destinationId, persons, status });
+  const rides = [r('a', '16:00', 'ritorno', 'seceda', 2), r('b', '16:00', 'ritorno', 'seceda', 3), r('c', '09:00', 'andata', 'seceda'), r('d', '09:00', 'andata', 'monte-pana')];
+
+  it('stesso orario e stesso punto di ritiro = un solo viaggio (all’andata il ritiro è sempre in hotel)', () => {
+    const trips = groupTrips(rides);
+    expect(trips.map((t) => `${t.time}|${t.pickup}|${t.rides.length}|${t.persons}`)).toEqual(['09:00|hotel|2|4', '16:00|seceda|2|5']);
+  });
+
+  it('due viaggi diversi devono stare ad almeno 20 minuti', () => {
+    const busy = busySlots(rides, TODAY);
+    expect(busy).toEqual([
+      { time: '09:00', pickup: 'hotel', persons: 4 },
+      { time: '16:00', pickup: 'seceda', persons: 5 },
+    ]);
+    const q = (time: string, direction: 'andata' | 'ritorno', destinationId: string, persons = 2) => checkTrip({ time, direction, destinationId, persons }, busy, S);
+    expect(q('16:00', 'ritorno', 'monte-pana')).toBe('orario_occupato'); // stessa ora, altro impianto
+    expect(q('16:10', 'ritorno', 'seceda')).toBe('orario_occupato'); // stesso impianto, troppo vicino
+    expect(q('15:45', 'andata', 'seceda')).toBe('orario_occupato'); // dall'hotel 15 minuti prima
+    expect(q('16:00', 'ritorno', 'seceda', 3)).toBeNull(); // si aggiunge al viaggio
+    expect(q('16:00', 'ritorno', 'seceda', 4)).toBe('posti_esauriti');
+    expect(q('16:20', 'ritorno', 'monte-pana')).toBeNull();
+    expect(q('09:00', 'andata', 'alpe-di-siusi')).toBeNull(); // stesso ritiro in hotel
+    expect(checkTrip({ time: '16:05', direction: 'ritorno', destinationId: 'monte-pana', persons: 2 }, busy, { ...S, pickupGapMinutes: 0 })).toBeNull();
+    expect(busySlots([...rides, r('x', '12:00', 'ritorno', 'seceda', 2, 'annullata')], TODAY).some((b) => b.time === '12:00')).toBe(false);
+  });
+
+  it('propone gli orari validi più vicini, compreso il viaggio da condividere', () => {
+    const busy = busySlots(rides, TODAY);
+    const s = suggestTimes({ serviceDate: TODAY, time: '16:05', direction: 'ritorno', destinationId: 'seceda', persons: 2 }, busy, S, NOW, 'ospite');
+    expect(s).toEqual([
+      { time: '15:40', join: false },
+      { time: '16:00', join: true },
+      { time: '16:20', join: false },
+      { time: '16:25', join: false },
+    ]);
+    const other = suggestTimes({ serviceDate: TODAY, time: '16:00', direction: 'ritorno', destinationId: 'monte-pana', persons: 2 }, busy, S, NOW, 'ospite');
+    expect(other.every((x) => !x.join && checkTrip({ time: x.time, direction: 'ritorno', destinationId: 'monte-pana', persons: 2 }, busy, S) === null)).toBe(true);
+    expect(other.map((x) => x.time)).toEqual(['15:35', '15:40', '16:20', '16:25']);
+  });
+
+  it('segnala alla reception e all’autista le corse già in conflitto', () => {
+    const list = [...rides, r('e', '16:05', 'ritorno', 'col-raiser'), r('f', '16:05', 'ritorno', 'monte-pana', 2, 'completata')];
+    const c = rideConflicts(list, S);
+    expect([...c.keys()].sort()).toEqual(['a', 'b', 'e']);
+    expect(c.get('e')!.map((x) => x.id).sort()).toEqual(['a', 'b']);
+    const full = rideConflicts([r('g', '10:00', 'andata', 'seceda', 5), r('h', '10:00', 'andata', 'palmer', 4)], S);
+    expect([...full.keys()].sort()).toEqual(['g', 'h']); // stesso viaggio oltre gli 8 posti
   });
 });

@@ -360,6 +360,14 @@ function ServiceSection({ draft, set }: { draft: ShuttleSettings; set: SetFn }) 
           <FieldLabel>Anticipo minimo per l’ospite (minuti)</FieldLabel>
           <Stepper label="Anticipo" value={draft.minLeadMinutes} min={0} max={120} steps={[5]} onChange={(v) => set('minLeadMinutes', v)} />
         </div>
+        <div>
+          <FieldLabel>Tempo tra due viaggi del mezzo (minuti)</FieldLabel>
+          <Stepper label="Tempo tra due viaggi" value={draft.pickupGapMinutes} min={0} max={60} steps={[5]} onChange={(v) => set('pickupGapMinutes', v)} />
+          <p className="mt-1 text-xs text-muted">
+            Il mezzo è uno solo: un ospite non può prenotare a meno di questi minuti da un altro viaggio (altro impianto o altro orario).
+            Alla stessa ora e dallo stesso punto si viaggia insieme, fino ai posti. 0 = nessun controllo.
+          </p>
+        </div>
         <div className="flex gap-3">
           <div className="flex-1">
             <FieldLabel htmlFor="svc-start">Prima corsa</FieldLabel>

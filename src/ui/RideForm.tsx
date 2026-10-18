@@ -1,10 +1,10 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { ArrowDownLeft, ArrowUpRight, Mountain, Send } from 'lucide-react';
+import { AlertTriangle, ArrowDownLeft, ArrowUpRight, Mountain, Send } from 'lucide-react';
 import type { GuestStrings } from '../domain/i18n';
-import { earliestSlot, suggestedTime, validateRideInput, type RideInputProblem } from '../domain/rules';
+import { busySlots, earliestSlot, isOpen, pickupKey, suggestTimes, suggestedTime, tripClashes, validateRideInput, type RideInputProblem } from '../domain/rules';
 import { addDays, fromMinutes, romeDate, toMinutes } from '../domain/time';
-import type { Direction, IsoDate, RideInput, ShuttleSettings } from '../domain/types';
-import { Button, FieldLabel, Segmented, Stepper, cx } from './kit';
+import type { Direction, IsoDate, Ride, RideInput, ShuttleSettings } from '../domain/types';
+import { Button, FieldLabel, InlineConfirm, Segmented, Stepper, cx } from './kit';
 
 export interface RideFormProps {
   settings: ShuttleSettings;
@@ -19,10 +19,12 @@ export interface RideFormProps {
   submitLabel?: string;
   /** Disabilita l'invio finché manca un dato esterno (es. la camera). */
   blocked?: boolean;
+  /** Corse già inserite (oggi e domani): il mezzo è uno solo, la reception viene avvisata dei viaggi sovrapposti. */
+  rides?: Ride[];
   onSubmit: (input: RideInput) => Promise<void>;
 }
 
-export function RideForm({ settings, nowMs, strings: t, actor, defaultPersons, validUntil, header, submitLabel, blocked, onSubmit }: RideFormProps) {
+export function RideForm({ settings, nowMs, strings: t, actor, defaultPersons, validUntil, header, submitLabel, blocked, rides = [], onSubmit }: RideFormProps) {
   const today = romeDate(nowMs);
   const tomorrow = addDays(today, 1);
   const todayOpen = earliestSlot(settings, nowMs, today, actor) !== null;
@@ -72,10 +74,25 @@ export function RideForm({ settings, nowMs, strings: t, actor, defaultPersons, v
   const shown = showProblems ? [...new Set([...problems, ...serverProblems])] : serverProblems;
   const active = settings.destinations.filter((d) => d.active);
 
-  const submit = async (e: React.FormEvent) => {
-    e.preventDefault();
+  // Il mezzo è uno solo: viaggi già previsti troppo vicini (o lo stesso viaggio già pieno).
+  const dayRides = rides.filter((r) => r.serviceDate === serviceDate && isOpen(r.status));
+  const taken = busySlots(dayRides, serviceDate);
+  const tripReady = direction === 'andata' || !!destinationId;
+  const trip = tripReady ? tripClashes(input, taken, settings) : { problem: null, clashes: [] };
+  const clashRides = trip.problem ? dayRides.filter((r) => trip.clashes.some((c) => c.time === r.time && c.pickup === pickupKey(r))) : [];
+  const suggestions = trip.problem ? suggestTimes(input, taken, settings, nowMs, actor) : [];
+  const [askTrip, setAskTrip] = useState(false);
+  useEffect(() => setAskTrip(false), [serviceDate, time, direction, destinationId, persons]);
+
+  const submit = async (e?: React.FormEvent, force = false) => {
+    e?.preventDefault();
     setShowProblems(true);
     if (problems.length || blocked) return;
+    if (trip.problem && !force) {
+      setAskTrip(true);
+      return;
+    }
+    setAskTrip(false);
     setBusy(true);
     setServerProblems([]);
     try {
@@ -193,6 +210,44 @@ export function RideForm({ settings, nowMs, strings: t, actor, defaultPersons, v
             {t.accept}
           </label>
         </div>
+      ) : null}
+
+      {trip.problem ? (
+        <div role="alert" className="flex flex-col gap-2 rounded-xl border-2 border-warn bg-warn-soft p-3 text-sm">
+          <p className="flex items-start gap-2 font-bold text-warn">
+            <AlertTriangle size={18} className="mt-0.5 shrink-0" aria-hidden />
+            {trip.problem === 'posti_esauriti' ? `Il viaggio delle ${time} è già pieno (${settings.seats} posti).` : `Il mezzo è già impegnato: due viaggi devono stare ad almeno ${settings.pickupGapMinutes} minuti.`}
+          </p>
+          <ul className="flex flex-col gap-0.5">
+            {clashRides.map((r) => (
+              <li key={r.id} className="tnum">
+                <strong>{r.time}</strong> · {r.direction === 'andata' ? `Hotel → ${r.destinationName}` : `${r.destinationName} → Hotel`} · camera {r.room} ({r.persons} pers.)
+              </li>
+            ))}
+          </ul>
+          {suggestions.length ? (
+            <div className="flex flex-wrap items-center gap-1.5">
+              <span className="text-muted">Orari liberi:</span>
+              {suggestions.map((s) => (
+                <button key={s.time} type="button" onClick={() => setTime(s.time)} className="tnum min-h-9 rounded-lg border border-line bg-bg px-2.5 font-bold">
+                  {s.time}
+                  {s.join ? <span className="ml-1 text-xs font-normal text-muted">insieme</span> : null}
+                </button>
+              ))}
+            </div>
+          ) : null}
+          <p className="text-xs text-muted">Puoi inserirla comunque (per esempio con un taxi): l’autista vedrà l’avviso di conflitto.</p>
+        </div>
+      ) : null}
+
+      {askTrip ? (
+        <InlineConfirm
+          question="Il mezzo è già impegnato a quell’ora. Inserire comunque la corsa?"
+          confirmLabel="Inserisci comunque"
+          cancelLabel="Cambio orario"
+          onCancel={() => setAskTrip(false)}
+          onConfirm={() => void submit(undefined, true)}
+        />
       ) : null}
 
       {shown.length ? (
