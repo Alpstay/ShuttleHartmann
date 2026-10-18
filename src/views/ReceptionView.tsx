@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AlertTriangle, ArrowDownLeft, ArrowLeft, ArrowUpRight, BellRing, Check, Circle, CircleX, Download, KeyRound, Lock, Plus, RefreshCw, Settings, Trash2, UserX, X } from 'lucide-react';
 import { GUEST_STRINGS } from '../domain/i18n';
-import { CHARGE_LABEL, DRIVER_MESSAGE_LABEL, compareRides, isOpen, isStayValid, rideConflicts, ridesToCsv, waitState } from '../domain/rules';
+import { CHARGE_LABEL, DRIVER_MESSAGE_LABEL, EXTRA_ROOM, compareRides, isOpen, isStayValid, rideConflicts, rideWho, ridesToCsv, waitState, whoText } from '../domain/rules';
 import { addDays, formatLongDate, formatShortDate, romeDate, romeMinutesOfDay, romeTimeOf, toMinutes } from '../domain/time';
 import type { Direction, IsoDate, PresenceSnapshot, Ride, RideEvent, ShuttleSettings, ShuttleStay } from '../domain/types';
 import { PresenceError, roomPresences, roomsToSync, type RoomPresence } from '../presence/presence';
@@ -238,7 +238,7 @@ export function ReceptionView({ onSignOut }: { onSignOut?: () => void }) {
               onCreated={(r) => {
                 setCreating(null);
                 if (r.serviceDate !== date) setDate(r.serviceDate);
-                showToast(`Corsa inserita: camera ${r.room} alle ${r.time}.`);
+                showToast(`Corsa inserita: ${whoText(r)} alle ${r.time}.`);
               }}
             />
           ) : null}
@@ -272,6 +272,26 @@ export function ReceptionView({ onSignOut }: { onSignOut?: () => void }) {
                   onNewRide={() => setCreating({ room: rp.room })}
                 />
               ))}
+              {/* Corse extra per chi non è ospite dell'Hartmann, in una riga a parte. */}
+              {rides.some((r) => r.room === EXTRA_ROOM) ? (
+                <RoomLine
+                  key={EXTRA_ROOM}
+                  extra
+                  rp={{ room: EXTRA_ROOM, current: null, leaving: null }}
+                  date={date}
+                  now={now}
+                  settings={settings}
+                  rides={rides.filter((r) => r.room === EXTRA_ROOM).sort(compareRides)}
+                  conflicts={conflicts}
+                  stay={null}
+                  open={false}
+                  onToggle={() => setCreating({ room: EXTRA_ROOM })}
+                  publicUrl={publicUrl}
+                  canPrint={false}
+                  act={act}
+                  onNewRide={() => setCreating({ room: EXTRA_ROOM })}
+                />
+              ) : null}
             </ul>
           </div>
 
@@ -302,6 +322,7 @@ function RoomLine({
   canPrint,
   act,
   onNewRide,
+  extra,
 }: {
   rp: RoomPresence;
   date: IsoDate;
@@ -316,6 +337,8 @@ function RoomLine({
   canPrint: boolean;
   act: (fn: () => Promise<unknown>, ok?: string) => Promise<void>;
   onNewRide: () => void;
+  /** Riga delle corse extra (non ospiti): niente QR né attivazione, un tocco apre una nuova corsa extra. */
+  extra?: boolean;
 }) {
   const p = rp.current ?? rp.leaving;
   const empty = !p && rides.length === 0;
@@ -329,7 +352,7 @@ function RoomLine({
           {dir === 'andata' ? 'Andata' : 'Ritorno'}
         </span>
         {list.length ? (
-          list.map((r) => <RideCell key={r.id} ride={r} settings={settings} now={now} date={date} act={act} clash={conflicts.get(r.id)} />)
+          list.map((r) => <RideCell key={r.id} ride={r} settings={settings} now={now} date={date} act={act} clash={conflicts.get(r.id)} who={extra ? rideWho(r).replace(/^Extra · /, '') : undefined} />)
         ) : (
           <span className="flex min-h-11 items-center text-muted" aria-label="Nessuna corsa">
             —
@@ -342,6 +365,12 @@ function RoomLine({
   return (
     <li className={cx(empty && 'bg-surface/60')}>
       <div className="grid grid-cols-1 gap-3 px-3 py-3 @xl:grid-cols-[110px_minmax(0,1fr)_minmax(0,1fr)]">
+        {extra ? (
+          <button type="button" onClick={onNewRide} className="flex items-start gap-2 text-left @xl:flex-col @xl:gap-0.5">
+            <span className="font-title text-3xl leading-none text-gold">Extra</span>
+            <span className="text-xs text-muted">Non ospiti dell’Hartmann · tocca per una nuova corsa</span>
+          </button>
+        ) : (
         <button type="button" onClick={onToggle} aria-expanded={open} className="flex items-start gap-2 text-left @xl:flex-col @xl:gap-0.5">
           <span className={cx('tnum font-title text-3xl leading-none', empty && 'text-muted')}>{rp.room}</span>
           <span className="flex min-w-0 flex-col">
@@ -352,6 +381,7 @@ function RoomLine({
             {p && !stay && p.state !== 'partito' ? <span className="text-xs font-bold text-warn">Shuttle non attivo</span> : null}
           </span>
         </button>
+        )}
         <div className="grid grid-cols-2 gap-3 @xl:contents">
           {cell('andata')}
           {cell('ritorno')}
@@ -366,7 +396,7 @@ function RoomLine({
 }
 
 /** Spunta della corsa: fatto, non fatto (con lo stato del momento) o non presentato. */
-function RideCell({ ride: r, settings, now, date, act, clash }: { ride: Ride; settings: ShuttleSettings; now: number; date: IsoDate; act: (fn: () => Promise<unknown>, ok?: string) => Promise<void>; clash?: Ride[] }) {
+function RideCell({ ride: r, settings, now, date, act, clash, who }: { ride: Ride; settings: ShuttleSettings; now: number; date: IsoDate; act: (fn: () => Promise<unknown>, ok?: string) => Promise<void>; clash?: Ride[]; who?: string }) {
   const { backend } = useApp();
   const [open, setOpen] = useState(false);
   const [events, setEvents] = useState<RideEvent[] | null>(null);
@@ -425,7 +455,8 @@ function RideCell({ ride: r, settings, now, date, act, clash }: { ride: Ride; se
         </span>
         <span className="flex min-w-0 flex-col">
           <span className="truncate">
-            <span className={cx('tnum font-bold', cancelled && 'line-through')}>{r.time}</span> {r.destinationName} <span className="text-muted">· {r.persons} pers.</span>
+            <span className={cx('tnum font-bold', cancelled && 'line-through')}>{r.time}</span> {who ? <strong>{who} · </strong> : null}
+            {r.destinationName} <span className="text-muted">· {r.persons} pers.</span>
           </span>
           <span className={cx('truncate text-xs', done ? 'text-ok' : noShow ? 'font-bold text-bad' : late ? 'font-bold text-warn' : 'text-muted')}>
             {wait ? (
@@ -448,7 +479,7 @@ function RideCell({ ride: r, settings, now, date, act, clash }: { ride: Ride; se
           <AlertTriangle size={14} className="mt-px shrink-0" aria-hidden />
           <span>
             Mezzo già impegnato:{' '}
-            {clash.map((o) => `${o.time} camera ${o.room} (${o.direction === 'andata' ? `Hotel → ${o.destinationName}` : `da ${o.destinationName}`})`).join(' · ')}
+            {clash.map((o) => `${o.time} ${whoText(o)} (${o.direction === 'andata' ? `Hotel → ${o.destinationName}` : `da ${o.destinationName}`})`).join(' · ')}
           </span>
         </p>
       ) : null}
@@ -675,6 +706,10 @@ function NewRidePanel({
   const { backend } = useApp();
   const [room, setRoom] = useState(initialRoom);
   const [error, setError] = useState<string | null>(null);
+  // Corsa extra per chi non è ospite dell'Hartmann: nome o riferimento obbligatorio, telefono facoltativo.
+  const isExtraRide = room === EXTRA_ROOM;
+  const [extraName, setExtraName] = useState('');
+  const [extraPhone, setExtraPhone] = useState('');
   // Corse di oggi e domani, per avvisare dei viaggi sovrapposti mentre si sceglie l'orario.
   const today = romeDate(now);
   const tomorrow = addDays(today, 1);
@@ -705,9 +740,9 @@ function NewRidePanel({
           nowMs={now}
           strings={GUEST_STRINGS.it}
           actor="reception"
-          defaultPersons={persons}
-          submitLabel="Inserisci corsa"
-          blocked={!room}
+          defaultPersons={isExtraRide ? 2 : persons}
+          submitLabel={isExtraRide ? 'Inserisci corsa extra' : 'Inserisci corsa'}
+          blocked={!room || (isExtraRide && !extraName.trim())}
           rides={[...(dayRides[today] ?? []), ...(dayRides[tomorrow] ?? [])]}
           header={
             <fieldset>
@@ -724,14 +759,43 @@ function NewRidePanel({
                     {r.room}
                   </button>
                 ))}
+                <button
+                  type="button"
+                  onClick={() => setRoom(EXTRA_ROOM)}
+                  aria-pressed={isExtraRide}
+                  className={cx('min-h-11 rounded-xl border px-3 text-sm font-bold', isExtraRide ? 'border-gold bg-gold-soft' : 'border-dashed border-line')}
+                >
+                  + Extra (non ospite)
+                </button>
               </div>
               {room && rp?.current?.name ? <p className="mt-1.5 text-sm text-muted">{rp.current.name}</p> : null}
+              {isExtraRide ? (
+                <div className="mt-2 grid grid-cols-1 gap-2 @md:grid-cols-2">
+                  <label className="flex flex-col gap-1 text-xs font-bold text-muted">
+                    Nome o riferimento *
+                    <input id="extra-name" value={extraName} maxLength={60} onChange={(e) => setExtraName(e.target.value)} placeholder="es. Rossi – Hotel Acadia" className="min-h-11 rounded-lg border border-line bg-bg px-3 text-base font-normal text-fg" />
+                  </label>
+                  <label className="flex flex-col gap-1 text-xs font-bold text-muted">
+                    Telefono (facoltativo)
+                    <input id="extra-phone" type="tel" value={extraPhone} maxLength={30} onChange={(e) => setExtraPhone(e.target.value)} className="min-h-11 rounded-lg border border-line bg-bg px-3 text-base font-normal text-fg" />
+                  </label>
+                </div>
+              ) : null}
             </fieldset>
           }
           onSubmit={async (input) => {
             setError(null);
             try {
-              const r = await backend.staff.createRide({ ...input, room, stayId: stay?.id ?? null, reservationId: stay?.reservationId ?? rp?.current?.reservationId ?? null });
+              const r = isExtraRide
+                ? await backend.staff.createRide({
+                    ...input,
+                    room: EXTRA_ROOM,
+                    stayId: null,
+                    reservationId: null,
+                    // Il nome apre la nota: reception e autista lo vedono al posto del numero di camera.
+                    note: [extraName.trim().replace(/ · /g, ' - '), extraPhone.trim(), input.note?.trim()].filter(Boolean).join(' · ').slice(0, 200),
+                  })
+                : await backend.staff.createRide({ ...input, room, stayId: stay?.id ?? null, reservationId: stay?.reservationId ?? rp?.current?.reservationId ?? null });
               onCreated(r);
             } catch (e) {
               if ((e as { code?: string }).code === 'non_valida') throw e;

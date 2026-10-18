@@ -18,6 +18,7 @@ export function PinPad({
   error,
   onSubmit,
   id,
+  compact,
 }: {
   label: string;
   hint?: string;
@@ -30,6 +31,8 @@ export function PinPad({
   error?: string | null;
   onSubmit: (value: string) => void | Promise<void>;
   id: string;
+  /** Versione bassa (accesso dell'ospite): tutto in uno schermo di telefono, senza scorrere. */
+  compact?: boolean;
 }) {
   const [value, setValue] = useState('');
   const input = useRef<HTMLInputElement>(null);
@@ -52,14 +55,14 @@ export function PinPad({
 
   return (
     <form
-      className="mx-auto flex w-full max-w-xs flex-col gap-4"
+      className={cx('mx-auto flex w-full max-w-xs flex-col', compact ? 'gap-2.5' : 'gap-4')}
       onSubmit={(e) => {
         e.preventDefault();
         submit(value);
       }}
     >
       <label htmlFor={id} className="text-center">
-        <span className="block text-lg font-bold">{label}</span>
+        <span className={cx('block font-bold', compact ? 'text-base' : 'text-lg')}>{label}</span>
         {hint ? <span className="block text-sm text-muted">{hint}</span> : null}
       </label>
       <div className="relative">
@@ -76,7 +79,8 @@ export function PinPad({
             if (length && v.length === length) submit(v);
           }}
           className={cx(
-            'tnum h-16 w-full rounded-2xl border bg-bg text-center font-title text-4xl tracking-[0.35em] caret-transparent',
+            'tnum w-full rounded-2xl border bg-bg text-center font-title tracking-[0.35em] caret-transparent',
+            compact ? 'h-14 text-3xl' : 'h-16 text-4xl',
             error ? 'border-bad' : 'border-line',
             masked && 'text-transparent',
           )}
@@ -94,19 +98,19 @@ export function PinPad({
           {error}
         </p>
       ) : null}
-      <div className="grid grid-cols-3 gap-2" role="group" aria-label="Tastierino">
+      <div className={cx('grid grid-cols-3', compact ? 'gap-1.5' : 'gap-2')} role="group" aria-label="Tastierino">
         {['1', '2', '3', '4', '5', '6', '7', '8', '9'].map((d) => (
-          <Button key={d} size="xl" className="tnum text-2xl" onClick={() => type(d)} disabled={busy}>
+          <Button key={d} size={compact ? 'lg' : 'xl'} className="tnum text-2xl" onClick={() => type(d)} disabled={busy}>
             {d}
           </Button>
         ))}
-        <Button size="xl" tone="ghost" aria-label="Cancella tutto" onClick={() => setValue('')} disabled={busy || !value}>
+        <Button size={compact ? 'lg' : 'xl'} tone="ghost" aria-label="Cancella tutto" onClick={() => setValue('')} disabled={busy || !value}>
           C
         </Button>
-        <Button size="xl" className="tnum text-2xl" onClick={() => type('0')} disabled={busy}>
+        <Button size={compact ? 'lg' : 'xl'} className="tnum text-2xl" onClick={() => type('0')} disabled={busy}>
           0
         </Button>
-        <Button size="xl" tone="ghost" aria-label="Cancella l’ultima cifra" onClick={() => setValue(value.slice(0, -1))} disabled={busy || !value}>
+        <Button size={compact ? 'lg' : 'xl'} tone="ghost" aria-label="Cancella l’ultima cifra" onClick={() => setValue(value.slice(0, -1))} disabled={busy || !value}>
           <Delete size={22} />
         </Button>
       </div>

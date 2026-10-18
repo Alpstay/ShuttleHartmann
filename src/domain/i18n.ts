@@ -87,6 +87,22 @@ export interface GuestStrings {
   freeTimes: string;
   joinTrip: string;
   noFreeTimes: string;
+  meetingPoint: string;
+  openMap: string;
+  // fuori orario: taxi
+  outOfServiceTitle: string;
+  serviceHours: (hours: string) => string;
+  taxiHint: (name: string) => string;
+  // pagina informazioni
+  info: string;
+  infoTitle: string;
+  infoHours: string;
+  infoHow: string;
+  infoSteps: (waitMinutes: number) => string[];
+  infoMeeting: string;
+  infoSeats: (seats: number) => string;
+  infoOutside: string;
+  infoReception: string;
   stepOf: (n: number, total: number) => string;
 }
 
@@ -189,6 +205,25 @@ const it: GuestStrings = {
   freeTimes: 'Orari disponibili',
   joinTrip: 'con altri ospiti',
   noFreeTimes: 'Nessun orario libero in questo giorno: chiama la reception.',
+  meetingPoint: 'Punto d’incontro',
+  openMap: 'Apri la mappa',
+  outOfServiceTitle: 'A quest’ora la navetta non è in servizio',
+  serviceHours: (h) => `Orari della navetta: ${h}.`,
+  taxiHint: (n) => `Fuori orario puoi chiamare ${n}:`,
+  info: 'Info',
+  infoTitle: 'Informazioni sulla navetta',
+  infoHours: 'Orari',
+  infoHow: 'Come funziona',
+  infoSteps: (w) => [
+    'Prenota da qui: andata agli impianti o ritorno in hotel, per oggi o per domani.',
+    'L’autista conferma e ti avvisa: «arrivo fra 7 minuti», poi «sono arrivato».',
+    `All’impianto l’autista attende al massimo ${w} minuti: una corsa non utilizzata può essere addebitata.`,
+    'Puoi cancellare la corsa finché l’autista non ti ha avvisato di essere arrivato.',
+  ],
+  infoMeeting: 'Punti d’incontro agli impianti',
+  infoSeats: (n) => `La navetta ha ${n} posti: alla stessa ora e dallo stesso punto si viaggia insieme.`,
+  infoOutside: 'Fuori orario',
+  infoReception: 'Reception',
   stepOf: (n, t) => `Passo ${n} di ${t}`,
 };
 
@@ -291,6 +326,25 @@ const de: GuestStrings = {
   freeTimes: 'Freie Zeiten',
   joinTrip: 'mit anderen Gästen',
   noFreeTimes: 'An diesem Tag ist keine Zeit mehr frei: bitte die Rezeption anrufen.',
+  meetingPoint: 'Treffpunkt',
+  openMap: 'Karte öffnen',
+  outOfServiceTitle: 'Zu dieser Zeit fährt der Shuttle nicht',
+  serviceHours: (h) => `Shuttle-Zeiten: ${h}.`,
+  taxiHint: (n) => `Außerhalb dieser Zeiten erreichen Sie ${n}:`,
+  info: 'Info',
+  infoTitle: 'Informationen zum Shuttle',
+  infoHours: 'Fahrzeiten',
+  infoHow: 'So funktioniert es',
+  infoSteps: (w) => [
+    'Hier buchen: Hinfahrt zum Lift oder Rückfahrt ins Hotel, für heute oder morgen.',
+    'Der Fahrer bestätigt und benachrichtigt Sie: „Ankunft in 7 Minuten“, dann „Ich bin da“.',
+    `Am Lift wartet der Fahrer höchstens ${w} Minuten: eine nicht genutzte Fahrt kann berechnet werden.`,
+    'Sie können stornieren, bis der Fahrer seine Ankunft gemeldet hat.',
+  ],
+  infoMeeting: 'Treffpunkte an den Liften',
+  infoSeats: (n) => `Der Shuttle hat ${n} Plätze: zur gleichen Zeit und vom gleichen Ort fährt man gemeinsam.`,
+  infoOutside: 'Außerhalb der Fahrzeiten',
+  infoReception: 'Rezeption',
   stepOf: (n, t) => `Schritt ${n} von ${t}`,
 };
 
@@ -393,6 +447,25 @@ const en: GuestStrings = {
   freeTimes: 'Available times',
   joinTrip: 'with other guests',
   noFreeTimes: 'No free time left on this day: please call reception.',
+  meetingPoint: 'Meeting point',
+  openMap: 'Open map',
+  outOfServiceTitle: 'The shuttle is not running at this time',
+  serviceHours: (h) => `Shuttle hours: ${h}.`,
+  taxiHint: (n) => `Outside these hours you can call ${n}:`,
+  info: 'Info',
+  infoTitle: 'Shuttle information',
+  infoHours: 'Hours',
+  infoHow: 'How it works',
+  infoSteps: (w) => [
+    'Book here: to the lifts or back to the hotel, for today or tomorrow.',
+    'The driver confirms and lets you know: “arriving in 7 minutes”, then “I’m here”.',
+    `At the lift the driver waits up to ${w} minutes: an unused ride may be charged.`,
+    'You can cancel until the driver has told you he has arrived.',
+  ],
+  infoMeeting: 'Meeting points at the lifts',
+  infoSeats: (n) => `The shuttle has ${n} seats: same time and same place means you ride together.`,
+  infoOutside: 'Outside shuttle hours',
+  infoReception: 'Reception',
   stepOf: (n, t) => `Step ${n} of ${t}`,
 };
 

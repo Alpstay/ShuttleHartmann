@@ -1,10 +1,11 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { BedDouble, Clock, Eye, EyeOff, KeyRound, MessageSquareText, Mountain, Plus, Save, Smartphone, Unplug, Users, X } from 'lucide-react';
+import { BedDouble, Clock, Eye, EyeOff, KeyRound, MapPin, MessageSquareText, Mountain, Plus, Save, Smartphone, Unplug, Users, X } from 'lucide-react';
 import { GUEST_STRINGS } from '../domain/i18n';
 import { normalizeRoom, staffPinProblem } from '../domain/rules';
 import { romeTimeOf, formatShortDate } from '../domain/time';
 import type { GuestAccessMode, ShuttleSettings } from '../domain/types';
 import type { StaffDevices, StaffRole } from '../store/ShuttleStore';
+import { mapHref } from '../ui/destinations';
 import { Button, FieldLabel, InlineConfirm, Stepper, cx, useApp } from '../ui/kit';
 
 type Section = 'accessi' | 'camere' | 'impianti' | 'servizio' | 'ospiti';
@@ -35,6 +36,10 @@ export function SettingsView({ settings, onSaved, notify }: { settings: ShuttleS
   const set = <K extends keyof ShuttleSettings>(k: K, v: ShuttleSettings[K]) => setDraft((d) => ({ ...d, [k]: v }));
   const problems = [
     draft.serviceStart >= draft.serviceEnd ? 'La prima corsa deve essere prima dell’ultima.' : null,
+    (draft.pauseStart && !draft.pauseEnd) || (!draft.pauseStart && draft.pauseEnd) ? 'Indica inizio e fine della pausa, oppure lasciale vuote entrambe.' : null,
+    draft.pauseStart && draft.pauseEnd && !(draft.serviceStart < draft.pauseStart && draft.pauseStart < draft.pauseEnd && draft.pauseEnd < draft.serviceEnd)
+      ? 'La pausa deve stare tra la prima e l’ultima corsa.'
+      : null,
     !draft.destinations.some((d) => d.active && d.name.trim()) ? 'Serve almeno un impianto attivo.' : null,
     draft.rooms.length === 0 ? 'Serve almeno una camera.' : null,
   ].filter((p): p is string => p !== null);
@@ -323,16 +328,48 @@ function DestinationsSection({ draft, set }: { draft: ShuttleSettings; set: SetF
     <section className="flex flex-col gap-3" aria-labelledby="h-dest">
       <h3 id="h-dest" className="text-lg">Impianti serviti</h3>
       {draft.destinations.map((d, i) => (
-        <div key={d.id} className="flex flex-wrap items-center gap-2">
-          <input id={`dest-name-${d.id}`} aria-label="Nome impianto" value={d.name} onChange={(e) => upd(i, { name: e.target.value })} className="min-h-11 min-w-0 flex-1 rounded-lg border border-line bg-bg px-3" />
-          <input id={`dest-place-${d.id}`} aria-label="Località" value={d.place} onChange={(e) => upd(i, { place: e.target.value })} className="min-h-11 w-32 rounded-lg border border-line bg-bg px-3" />
-          <label className="inline-flex min-h-11 items-center gap-2 text-sm">
-            <input id={`dest-active-${d.id}`} type="checkbox" checked={d.active} onChange={(e) => upd(i, { active: e.target.checked })} className="size-5 accent-[var(--gold)]" />
-            Attivo
-          </label>
+        <div key={d.id} className={cx('flex flex-col gap-2 rounded-xl border border-line p-3', !d.active && 'opacity-60')}>
+          <div className="flex flex-wrap items-center gap-2">
+            <input id={`dest-name-${d.id}`} aria-label="Nome impianto" value={d.name} onChange={(e) => upd(i, { name: e.target.value })} className="min-h-11 min-w-0 flex-1 rounded-lg border border-line bg-bg px-3 font-bold" />
+            <input id={`dest-place-${d.id}`} aria-label="Località" value={d.place} onChange={(e) => upd(i, { place: e.target.value })} className="min-h-11 w-32 rounded-lg border border-line bg-bg px-3" />
+            <label className="inline-flex min-h-11 items-center gap-2 text-sm">
+              <input id={`dest-active-${d.id}`} type="checkbox" checked={d.active} onChange={(e) => upd(i, { active: e.target.checked })} className="size-5 accent-[var(--gold)]" />
+              Attivo
+            </label>
+          </div>
+          {/* Meeting point: lo vedono l'ospite (quando prenota e nella sua corsa) e l'autista (con «Naviga»). */}
+          <div className="grid grid-cols-1 gap-2 @xl:grid-cols-2">
+            <label className="flex flex-col gap-1 text-xs font-bold text-muted">
+              <span className="inline-flex items-center gap-1">
+                <MapPin size={12} aria-hidden /> Meeting point (dove aspetta l’ospite)
+              </span>
+              <input
+                id={`dest-meeting-${d.id}`}
+                value={d.meetingPoint ?? ''}
+                placeholder="es. Parcheggio davanti alla biglietteria"
+                onChange={(e) => upd(i, { meetingPoint: e.target.value })}
+                className="min-h-11 rounded-lg border border-line bg-bg px-3 text-sm font-normal text-fg"
+              />
+            </label>
+            <label className="flex flex-col gap-1 text-xs font-bold text-muted">
+              <span>Posizione: link di Google Maps, coordinate o indirizzo</span>
+              <span className="flex gap-2">
+                <input
+                  id={`dest-map-${d.id}`}
+                  value={d.mapLink ?? ''}
+                  placeholder="es. https://maps.app.goo.gl/… oppure 46.5745, 11.6713"
+                  onChange={(e) => upd(i, { mapLink: e.target.value })}
+                  className="min-h-11 min-w-0 flex-1 rounded-lg border border-line bg-bg px-3 text-sm font-normal text-fg"
+                />
+                <a href={mapHref(d)} target="_blank" rel="noopener noreferrer" className="inline-flex min-h-11 shrink-0 items-center gap-1 rounded-lg border border-line bg-surface px-3 text-sm font-bold text-fg">
+                  <MapPin size={14} aria-hidden /> Prova
+                </a>
+              </span>
+            </label>
+          </div>
         </div>
       ))}
-      <Button size="sm" className="self-start" onClick={() => set('destinations', [...draft.destinations, { id: `imp-${Date.now().toString(36)}`, name: '', place: 'Ortisei', active: true }])}>
+      <Button size="sm" className="self-start" onClick={() => set('destinations', [...draft.destinations, { id: `imp-${Date.now().toString(36)}`, name: '', place: 'Ortisei', active: true, meetingPoint: '', mapLink: '' }])}>
         <Plus size={16} /> Aggiungi impianto
       </Button>
       <p className="text-xs text-muted">Gli impianti disattivati restano nello storico delle corse ma non sono più prenotabili.</p>
@@ -370,6 +407,16 @@ function ServiceSection({ draft, set }: { draft: ShuttleSettings; set: SetFn }) 
         </div>
         <div className="flex gap-3">
           <div className="flex-1">
+            <FieldLabel htmlFor="svc-pause-start">Pausa dalle (ultima corsa del mattino)</FieldLabel>
+            <input id="svc-pause-start" type="time" step={300} value={draft.pauseStart} onChange={(e) => set('pauseStart', e.target.value)} className="tnum min-h-11 w-full rounded-lg border border-line bg-bg px-3" />
+          </div>
+          <div className="flex-1">
+            <FieldLabel htmlFor="svc-pause-end">alle (prima corsa del pomeriggio)</FieldLabel>
+            <input id="svc-pause-end" type="time" step={300} value={draft.pauseEnd} onChange={(e) => set('pauseEnd', e.target.value)} className="tnum min-h-11 w-full rounded-lg border border-line bg-bg px-3" />
+          </div>
+        </div>
+        <div className="flex gap-3">
+          <div className="flex-1">
             <FieldLabel htmlFor="svc-start">Prima corsa</FieldLabel>
             <input id="svc-start" type="time" step={300} value={draft.serviceStart} onChange={(e) => set('serviceStart', e.target.value)} className="tnum min-h-11 w-full rounded-lg border border-line bg-bg px-3" />
           </div>
@@ -392,6 +439,17 @@ function GuestSection({ draft, set }: { draft: ShuttleSettings; set: SetFn }) {
         <input id="svc-phone" type="tel" value={draft.receptionPhone} onChange={(e) => set('receptionPhone', e.target.value)} placeholder="Facoltativo" className="min-h-11 w-full max-w-sm rounded-lg border border-line bg-bg px-3" />
         <p className="mt-1 text-xs text-muted">Compare quando l’autista ha già confermato e l’ospite non può più annullare da solo.</p>
       </div>
+      <div className="flex flex-wrap gap-3">
+        <div className="min-w-0 flex-1">
+          <FieldLabel htmlFor="svc-taxi-name">Taxi per chi prenota fuori orario</FieldLabel>
+          <input id="svc-taxi-name" value={draft.taxiName} onChange={(e) => set('taxiName', e.target.value)} className="min-h-11 w-full rounded-lg border border-line bg-bg px-3" />
+        </div>
+        <div className="min-w-0 flex-1">
+          <FieldLabel htmlFor="svc-taxi-phone">Telefono del taxi</FieldLabel>
+          <input id="svc-taxi-phone" type="tel" value={draft.taxiPhone} onChange={(e) => set('taxiPhone', e.target.value)} className="tnum min-h-11 w-full rounded-lg border border-line bg-bg px-3" />
+        </div>
+      </div>
+      <p className="-mt-2 text-xs text-muted">Se l’ospite sceglie un orario fuori servizio, la pagina gli mostra gli orari della navetta e il numero del taxi da chiamare.</p>
       <div className="flex flex-col gap-2">
         <p className="eyebrow">Condizioni che l’ospite accetta</p>
         {(['it', 'de', 'en'] as const).map((l) => (

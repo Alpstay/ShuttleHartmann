@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { AlertTriangle, ArrowDownLeft, ArrowUpRight, Mountain, Send } from 'lucide-react';
 import type { GuestStrings } from '../domain/i18n';
-import { busySlots, earliestSlot, isOpen, pickupKey, suggestTimes, suggestedTime, tripClashes, validateRideInput, type RideInputProblem } from '../domain/rules';
+import { busySlots, earliestSlot, isOpen, pickupKey, serviceHoursLabel, suggestTimes, suggestedTime, tripClashes, validateRideInput, type RideInputProblem } from '../domain/rules';
 import { addDays, fromMinutes, romeDate, toMinutes } from '../domain/time';
 import type { Direction, IsoDate, Ride, RideInput, ShuttleSettings } from '../domain/types';
 import { Button, FieldLabel, InlineConfirm, Segmented, Stepper, cx } from './kit';
@@ -184,9 +184,7 @@ export function RideForm({ settings, nowMs, strings: t, actor, defaultPersons, v
         ) : (
           <p className="text-sm text-muted">{t.noSlots}</p>
         )}
-        <p className="mt-1.5 text-xs text-muted">
-          {settings.serviceStart}–{settings.serviceEnd}
-        </p>
+        <p className="tnum mt-1.5 text-xs text-muted">{serviceHoursLabel(settings)}</p>
       </div>
 
       <div>

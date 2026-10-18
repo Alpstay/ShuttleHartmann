@@ -1,21 +1,23 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { AlertTriangle, ArrowRight, BellRing, Check, ChevronDown, Clock, Lock, MapPin, Navigation, Play, Sun, TrafficCone, UserX, Users, Volume2 } from 'lucide-react';
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import { AlertTriangle, ArrowLeft, ArrowRight, BellRing, Car, Check, ChevronDown, ChevronRight, Lock, MapPin, Navigation, Play, TrafficCone, UserX } from 'lucide-react';
 import {
   DEPART_ALERT_MINUTES,
-  DRIVER_MESSAGE_LABEL,
   HOTEL_PICKUP,
   compareRides,
   departLabel,
   departState,
   groupTrips,
+  isExtra,
   isOpen,
   rideConflicts,
+  rideWho,
   waitState,
   type Trip,
 } from '../domain/rules';
-import { addDays, romeDate, romeTimeOf } from '../domain/time';
+import { addDays, romeDate } from '../domain/time';
 import type { DriverMessageKind, Ride, RideStatus, ShuttleSettings } from '../domain/types';
-import { destinationColor } from '../ui/destinations';
+import { PresenceError, type PresenceErrorCode } from '../presence/presence';
+import { destinationColor, hasMeetingPoint, mapHref } from '../ui/destinations';
 import { Countdown, chime, cx, unlockSound, useApp, useNow, useToast, useWakeLock, vibrate } from '../ui/kit';
 import { AlpstayLogo } from '../ui/Logo';
 
@@ -47,12 +49,46 @@ const dropsOf = (t: Trip): { id: string; name: string }[] =>
   t.direction === 'ritorno'
     ? [{ id: HOTEL_PICKUP, name: 'Hotel' }]
     : [...new Map(t.rides.map((r) => [r.destinationId, { id: r.destinationId, name: r.destinationName }])).values()];
-const roomsOf = (t: Trip): string => t.rides.map((r) => r.room).join(' · ');
-/** «105», «105 e 107», «105, 107 e 108»: le camere come si direbbero a voce. */
-const roomsSpoken = (t: Trip): string => {
-  const rooms = t.rides.map((r) => r.room);
-  return rooms.length < 2 ? (rooms[0] ?? '') : `${rooms.slice(0, -1).join(', ')} e ${rooms[rooms.length - 1]}`;
+
+/**
+ * Nome dell'ospite («Cognome N.») di una corsa, dalle presenze cifrate di La Scatola. Si abbina solo con il
+ * reservation_id di Slope (invariato): una corsa senza prenotazione collegata mostra la sola camera, così
+ * non compare mai il nome di un altro ospite della stessa camera.
+ */
+type NameOf = (r: Ride) => string | null;
+const NamesContext = createContext<NameOf>(() => null);
+const useNameOf = (): NameOf => useContext(NamesContext);
+/** Nome scritto dalla reception per una corsa extra (prima parte della nota). */
+const extraNameOf = (r: Ride): string => (r.note ?? '').split(' · ')[0]?.trim() ?? '';
+/** «105 Meyer S.», «105» senza nome, «Extra · Rossi» per chi non è ospite. */
+const labelOf = (r: Ride, nameOf: NameOf): string => {
+  if (isExtra(r)) return rideWho(r);
+  const name = nameOf(r);
+  return name ? `${r.room} ${name}` : r.room;
 };
+const roomsOf = (t: Trip, nameOf: NameOf): string => t.rides.map((r) => labelOf(r, nameOf)).join(' · ');
+/** Per avvisi e messaggi: «camera 105 Meyer S.» oppure «Extra · Rossi». */
+const whoLong = (r: Ride, nameOf: NameOf): string => (isExtra(r) ? rideWho(r) : `camera ${labelOf(r, nameOf)}`);
+const roomsWord = (t: Trip): string => (t.rides.every(isExtra) ? '' : t.rides.length > 1 ? 'camere ' : 'camera ');
+
+/** Camere del viaggio nell'elenco: numero in grassetto pieno e, accanto, il nome dell'ospite. */
+function WhoInline({ rides }: { rides: Ride[] }) {
+  const nameOf = useNameOf();
+  return (
+    <>
+      {/* Una riga per camera: con più camere nello stesso viaggio numero e nome restano sempre insieme. */}
+      {rides.map((r) => (
+        <span key={r.id} className="block break-words">
+          <span className="font-black">{isExtra(r) ? 'Extra' : r.room}</span>
+          {isExtra(r) ? (extraNameOf(r) ? <span className="font-bold"> {extraNameOf(r)}</span> : null) : nameOf(r) ? <span className="font-bold"> {nameOf(r)}</span> : null}
+        </span>
+      ))}
+    </>
+  );
+}
+const capital = (s: string): string => s.charAt(0).toUpperCase() + s.slice(1);
+/** Nell'elenco basta il nome corto: «Col Raiser (Gardena Ronda/Saslong)» → «Col Raiser». */
+const short = (name: string): string => name.replace(/\s*\(.*\)\s*$/, '') || name;
 
 /**
  * Area autista, pensata per il telefono sul mezzo: un viaggio alla volta, grande e colorato, con le sole
@@ -60,7 +96,7 @@ const roomsSpoken = (t: Trip): string => {
  * (un tocco avvisa tutti). Due viaggi troppo vicini in posti diversi vengono segnalati.
  */
 export function DriverView({ onSignOut }: { onSignOut?: () => void }) {
-  const { backend } = useApp();
+  const { backend, presence } = useApp();
   const staff = backend.staff;
   const now = useNow(1000);
   const today = romeDate(now);
@@ -71,11 +107,49 @@ export function DriverView({ onSignOut }: { onSignOut?: () => void }) {
   const [settings, setSettings] = useState<ShuttleSettings | null>(null);
   const [focusKey, setFocusKey] = useState<string | null>(null);
   const [alerts, setAlerts] = useState<Alert[]>([]);
-  const [showDone, setShowDone] = useState(false);
   const [showTomorrow, setShowTomorrow] = useState(false);
   const [toast, showToast] = useToast();
-  const wakeActive = useWakeLock(started);
+  useWakeLock(started); // schermo sempre acceso durante il turno
   const soundOn = useRef(false);
+
+  // Nomi degli ospiti dalle presenze (oggi e domani), riletti ogni 5 minuti come in reception.
+  const [names, setNames] = useState<ReadonlyMap<string, string>>(new Map());
+  const [namesError, setNamesError] = useState<PresenceErrorCode | null>(null);
+  const [pwTick, setPwTick] = useState(0);
+  useEffect(() => {
+    if (!presence) return;
+    let alive = true;
+    const load = async () => {
+      if (presence.needsPassword && !presence.hasPassword()) {
+        setNamesError('password_mancante');
+        return;
+      }
+      const map = new Map<string, string>();
+      let error: PresenceErrorCode | null = null;
+      for (const d of [today, tomorrow]) {
+        try {
+          const snap = await presence.load(d);
+          // reservation_id di Slope usato così com'è, come chiave.
+          for (const s of snap.stays) if (s.name) map.set(s.reservationId, s.name);
+        } catch (e) {
+          error ??= e instanceof PresenceError ? e.code : 'rete';
+        }
+      }
+      if (!alive) return;
+      // Senza rete si tengono i nomi già letti; con la password sbagliata si svuota e si chiede di nuovo.
+      if (map.size || error === 'password_errata') setNames(map);
+      setNamesError(map.size ? null : error);
+    };
+    void load();
+    const id = window.setInterval(() => void load(), 5 * 60000);
+    return () => {
+      alive = false;
+      window.clearInterval(id);
+    };
+  }, [presence, today, tomorrow, pwTick]);
+  const nameOf = useCallback<NameOf>((r) => (r.reservationId ? (names.get(r.reservationId) ?? null) : null), [names]);
+  const nameRef = useRef(nameOf);
+  nameRef.current = nameOf;
 
   // Regole del servizio (attesa, tempo tra viaggi…) ricaricate ogni minuto: le modifiche della reception arrivano da sole.
   useEffect(() => {
@@ -101,10 +175,10 @@ export function DriverView({ onSignOut }: { onSignOut?: () => void }) {
           const when = r.serviceDate === today ? '' : 'domani ';
           const where = r.direction === 'andata' ? `Hotel → ${r.destinationName}` : `${r.destinationName} → Hotel`;
           const key = `${r.serviceDate}|${r.time}|${r.direction === 'andata' ? HOTEL_PICKUP : r.destinationId}`;
-          if (prev === undefined && r.status === 'richiesta') fresh.push({ id: r.id, tripKey: key, tone: 'nuova', text: `${when}${r.time} · camera ${r.room} · ${where}` });
+          if (prev === undefined && r.status === 'richiesta') fresh.push({ id: r.id, tripKey: key, tone: 'nuova', text: `${when}${r.time} · ${whoLong(r, nameRef.current)} · ${where}` });
           if (prev && prev !== 'annullata' && r.status === 'annullata') {
             const who = r.cancelledBy === 'ospite' ? 'Cancellata dall’ospite' : 'Annullata dalla reception';
-            fresh.push({ id: `${r.id}-x`, tripKey: null, tone: 'annullata', text: `${who}: ${when}${r.time} · camera ${r.room} · ${where}` });
+            fresh.push({ id: `${r.id}-x`, tripKey: null, tone: 'annullata', text: `${who}: ${when}${r.time} · ${whoLong(r, nameRef.current)} · ${where}` });
           }
         }
         if (fresh.length) {
@@ -125,27 +199,35 @@ export function DriverView({ onSignOut }: { onSignOut?: () => void }) {
     };
   }, [staff, today, tomorrow, showToast]);
 
-  // Viaggi di oggi ancora da fare: prima quello in cui l'autista è già sul posto, poi per orario.
-  const trips = useMemo(
-    () =>
-      groupTrips(todayRides.filter((r) => isOpen(r.status))).sort(
-        (x, y) =>
-          Number(y.rides.some((r) => r.status === 'sul_posto')) - Number(x.rides.some((r) => r.status === 'sul_posto')) ||
-          x.time.localeCompare(y.time) ||
-          x.direction.localeCompare(y.direction),
-      ),
-    [todayRides],
-  );
+  const act: Act = async (fn, ok) => {
+    try {
+      await fn();
+      if (ok) showToast(ok);
+    } catch (e) {
+      showToast((e as Error).message, 'bad');
+    }
+  };
+
+  // Viaggi di oggi ancora da fare, in ordine di orario.
+  const trips = useMemo(() => groupTrips(todayRides.filter((r) => isOpen(r.status))), [todayRides]);
   const conflicts = useMemo(() => (settings ? rideConflicts(todayRides, settings) : new Map<string, Ride[]>()), [todayRides, settings]);
   const clashOf = (t: Trip): Ride[] => {
     const inTrip = new Set(t.rides.map((r) => r.id));
     const others = t.rides.flatMap((r) => conflicts.get(r.id) ?? []).filter((o) => !inTrip.has(o.id));
     return [...new Map(others.map((o) => [o.id, o])).values()].sort(compareRides);
   };
-  const done = todayRides.filter((r) => !isOpen(r.status)).sort((x, y) => compareRides(y, x));
+  const done = todayRides.filter((r) => !isOpen(r.status));
   const tomorrowTrips = groupTrips(tomorrowRides.filter((r) => isOpen(r.status)));
-  const focus = trips.find((t) => t.key === focusKey) ?? trips[0] ?? null;
-  const rest = trips.filter((t) => t.key !== focus?.key);
+  // Un solo elenco per orario: i viaggi da fare e, al loro posto, le corse già chiuse con la spunta.
+  const entries: Entry[] = [...trips.map((t): Entry => ({ kind: 'trip', time: t.time, trip: t })), ...done.map((r): Entry => ({ kind: 'closed', time: r.time, ride: r }))].sort(
+    (a, b) => a.time.localeCompare(b.time) || (a.kind === b.kind ? 0 : a.kind === 'closed' ? -1 : 1),
+  );
+  // La scheda grande si apre solo toccando un viaggio; chiuso il viaggio, si torna all'elenco.
+  const focus = focusKey ? (trips.find((t) => t.key === focusKey) ?? null) : null;
+  const doneTrip = (t: Trip) =>
+    act(async () => {
+      for (const r of t.rides) if (r.status === 'confermata' || r.status === 'sul_posto') await staff.driverDone(r.id);
+    }, `Fatto: ${roomsWord(t)}${roomsOf(t, nameOf)}.`);
 
   // «Parti ora»: 7 minuti prima dell'orario, una sola volta per viaggio (e di nuovo se l'orario cambia).
   const departAlerted = useRef(new Set<string>());
@@ -155,22 +237,14 @@ export function DriverView({ onSignOut }: { onSignOut?: () => void }) {
     for (const t of trips) {
       if (departAlerted.current.has(t.key) || !t.rides.some((r) => departState(r, now))) continue;
       departAlerted.current.add(t.key);
-      fresh.push({ id: `${t.key}-via`, tripKey: t.key, tone: 'partenza', text: `${t.time} · ${t.rides.length > 1 ? 'camere' : 'camera'} ${roomsOf(t)} · pick-up ${pickupOf(t)}` });
+      fresh.push({ id: `${t.key}-via`, tripKey: t.key, tone: 'partenza', text: `${t.time} · ${roomsWord(t)}${roomsOf(t, nameRef.current)} · pick-up ${pickupOf(t)}` });
     }
     if (!fresh.length) return;
     setAlerts((x) => [...fresh, ...x.filter((a) => !fresh.some((f) => f.id === a.id))].slice(0, 3));
     if (soundOn.current) chime('partenza');
     else vibrate([300, 120, 300, 120, 300]);
   }, [started, trips, now]);
-
-  const act: Act = async (fn, ok) => {
-    try {
-      await fn();
-      if (ok) showToast(ok);
-    } catch (e) {
-      showToast((e as Error).message, 'bad');
-    }
-  };
+  const askPassword = !!presence?.needsPassword && (namesError === 'password_mancante' || namesError === 'password_errata');
 
   if (!settings) return <div className="driver-theme min-h-full p-6 text-[var(--d-on-bg-soft)]">Caricamento…</div>;
 
@@ -200,6 +274,15 @@ export function DriverView({ onSignOut }: { onSignOut?: () => void }) {
         <p className="max-w-xs text-sm text-[var(--d-on-bg-soft)]">
           Attiva il suono degli avvisi e tiene lo schermo acceso. {DEPART_ALERT_MINUTES} minuti prima di ogni corsa suona «Parti ora» e il luogo del pick-up lampeggia. Tieni la pagina aperta durante il turno.
         </p>
+        {askPassword && presence ? (
+          <NamesPassword
+            wrong={namesError === 'password_errata'}
+            onSave={(pw) => {
+              presence.setPassword(pw);
+              setPwTick((n) => n + 1);
+            }}
+          />
+        ) : null}
         {onSignOut ? (
           <button type="button" onClick={onSignOut} className="inline-flex min-h-11 items-center gap-2 rounded-full px-4 font-bold text-[var(--d-on-bg-soft)]">
             <Lock size={16} /> Blocca
@@ -210,14 +293,11 @@ export function DriverView({ onSignOut }: { onSignOut?: () => void }) {
   }
 
   return (
+    <NamesContext.Provider value={nameOf}>
     <div className="driver-theme flex min-h-full flex-col">
       <header className="sticky top-0 z-20 flex items-center gap-2 bg-[var(--d-bg-2)] px-4 py-2.5">
         <AlpstayLogo variant="simbolo" className="h-7 w-auto shrink-0" />
         <h1 className="mr-auto font-text text-xl font-black uppercase tracking-[0.12em]">Autista</h1>
-        <span className="flex items-center gap-1.5" aria-label={`Suono ${soundOn.current ? 'attivo' : 'non disponibile'}, schermo ${wakeActive ? 'sempre acceso' : 'normale'}`}>
-          <Volume2 size={18} className={soundOn.current ? 'text-[#7ee0a9]' : 'text-[var(--d-on-bg-soft)]'} aria-hidden />
-          <Sun size={18} className={wakeActive ? 'text-[#7ee0a9]' : 'text-[var(--d-on-bg-soft)]'} aria-hidden />
-        </span>
         {onSignOut ? (
           <button type="button" aria-label="Blocca" title="Blocca (serve il PIN per rientrare)" onClick={onSignOut} className="flex size-11 items-center justify-center rounded-full text-[var(--d-cream)] active:bg-white/10">
             <Lock size={18} />
@@ -250,58 +330,198 @@ export function DriverView({ onSignOut }: { onSignOut?: () => void }) {
         </div>
       ) : null}
 
-      <main className="flex flex-1 flex-col gap-5 px-4 py-4">
-        {focus ? (
+      {focus ? (
+        <main className="flex flex-1 flex-col gap-4 px-4 py-4">
+          <button type="button" onClick={() => setFocusKey(null)} className="inline-flex min-h-11 items-center gap-2 self-start rounded-full bg-white/10 px-4 font-black text-[var(--d-cream)] active:scale-[0.98]">
+            <ArrowLeft size={20} /> Elenco
+          </button>
           <TripCard key={focus.key} trip={focus} clash={clashOf(focus)} settings={settings} now={now} act={act} />
-        ) : (
-          <div className="flex flex-col items-center gap-3 rounded-[28px] bg-[var(--d-card)] px-4 py-12 text-center text-[var(--d-ink)]">
-            <span className="flex size-14 items-center justify-center rounded-full bg-[var(--d-ok)] text-[var(--d-cream)]">
-              <Check size={30} strokeWidth={3} aria-hidden />
+        </main>
+      ) : (
+        <main className="flex flex-1 flex-col gap-4 px-4 py-4">
+          <div className="flex items-baseline justify-between gap-2">
+            <h2 className="font-text text-2xl font-black">Oggi</h2>
+            <span className="tnum text-sm font-bold text-[var(--d-on-bg-soft)]">
+              {trips.length} da fare · {done.filter((r) => r.status === 'completata').length} fatte
             </span>
-            <p className="text-2xl font-black">Nessuna corsa da fare</p>
-            <p className="text-[var(--d-ink-soft)]">Le nuove richieste arrivano qui con un avviso.</p>
           </div>
-        )}
+          {entries.length ? (
+            <ul className="flex flex-col gap-2" aria-label="Viaggi di oggi">
+              {entries.map((e) =>
+                e.kind === 'trip' ? (
+                  <TripRow key={e.trip.key} trip={e.trip} settings={settings} now={now} clash={clashOf(e.trip).length > 0} onOpen={() => setFocusKey(e.trip.key)} onDone={() => void doneTrip(e.trip)} />
+                ) : (
+                  <ClosedRow key={e.ride.id} ride={e.ride} settings={settings} />
+                ),
+              )}
+            </ul>
+          ) : (
+            <div className="flex flex-col items-center gap-3 rounded-[28px] bg-[var(--d-card)] px-4 py-12 text-center text-[var(--d-ink)]">
+              <span className="flex size-14 items-center justify-center rounded-full bg-[var(--d-ok)] text-[var(--d-cream)]">
+                <Check size={30} strokeWidth={3} aria-hidden />
+              </span>
+              <p className="text-2xl font-black">Nessuna corsa oggi</p>
+              <p className="text-[var(--d-ink-soft)]">Le nuove richieste arrivano qui con un avviso.</p>
+            </div>
+          )}
 
-        {rest.length ? (
-          <section aria-labelledby="poi" className="flex flex-col gap-2">
-            <h2 id="poi" className="font-text text-xs font-black uppercase tracking-[0.2em] text-[var(--d-on-bg-soft)]">
-              Poi · {rest.length}
-            </h2>
-            <ul className="flex flex-col gap-2">
-              {rest.map((t) => (
+          {tomorrowTrips.length ? (
+            <Collapsible label={`Domani · ${tomorrowTrips.length}`} open={showTomorrow} onToggle={() => setShowTomorrow(!showTomorrow)}>
+              {tomorrowTrips.map((t) => (
                 <li key={t.key}>
-                  <TripLine trip={t} settings={settings} now={now} clash={clashOf(t).length > 0} onClick={() => setFocusKey(t.key)} />
+                  <TripLine trip={t} settings={settings} />
                 </li>
               ))}
-            </ul>
-          </section>
-        ) : null}
-
-        {tomorrowTrips.length ? (
-          <Collapsible label={`Domani · ${tomorrowTrips.length}`} open={showTomorrow} onToggle={() => setShowTomorrow(!showTomorrow)}>
-            {tomorrowTrips.map((t) => (
-              <li key={t.key}>
-                <TripLine trip={t} settings={settings} />
-              </li>
-            ))}
-          </Collapsible>
-        ) : null}
-
-        {done.length ? (
-          <Collapsible label={`Chiuse oggi · ${done.length}`} open={showDone} onToggle={() => setShowDone(!showDone)}>
-            {done.map((r) => (
-              <li key={r.id} className="flex min-h-14 items-center gap-3 rounded-2xl bg-[var(--d-card)] px-3 text-[var(--d-ink)]">
-                <span className="tnum w-16 text-xl font-black">{r.time}</span>
-                <span className="tnum flex h-9 min-w-12 items-center justify-center rounded-lg bg-[var(--d-ink)] px-2 font-black text-[var(--d-cream)]">{r.room}</span>
-                <span className="min-w-0 flex-1 truncate text-sm font-bold">{r.direction === 'andata' ? `→ ${r.destinationName}` : `${r.destinationName} →`}</span>
-                <StatusChip status={r.status} />
-              </li>
-            ))}
-          </Collapsible>
-        ) : null}
-      </main>
+            </Collapsible>
+          ) : null}
+          {askPassword && presence ? (
+            <NamesPassword
+              wrong={namesError === 'password_errata'}
+              onSave={(pw) => {
+                presence.setPassword(pw);
+                setPwTick((n) => n + 1);
+              }}
+            />
+          ) : null}
+        </main>
+      )}
     </div>
+    </NamesContext.Provider>
+  );
+}
+
+/**
+ * Password delle presenze, una volta sola su questo telefono: serve solo a mostrare il nome degli ospiti
+ * accanto alla camera. È facoltativa: senza, l'autista vede le camere come prima.
+ */
+function NamesPassword({ wrong, onSave }: { wrong: boolean; onSave: (pw: string) => void }) {
+  const [pw, setPw] = useState('');
+  return (
+    <form
+      className="flex w-full max-w-sm flex-col gap-2 rounded-2xl bg-white/10 p-3 text-left"
+      onSubmit={(e) => {
+        e.preventDefault();
+        if (pw.trim()) onSave(pw.trim());
+      }}
+    >
+      <label htmlFor="driver-presenze-pw" className="text-sm font-black">
+        {wrong ? 'Password non corretta: riprova.' : 'Nomi degli ospiti accanto alla camera: password presenze (una volta su questo telefono, facoltativa)'}
+      </label>
+      <div className="flex gap-2">
+        <input
+          id="driver-presenze-pw"
+          type="password"
+          autoComplete="current-password"
+          value={pw}
+          onChange={(e) => setPw(e.target.value)}
+          className="min-h-12 min-w-0 flex-1 rounded-xl bg-[var(--d-cream)] px-3 text-lg text-[var(--d-ink)]"
+        />
+        <button type="submit" className="min-h-12 rounded-xl bg-[var(--d-cream)] px-4 font-black text-[var(--d-bg)]">
+          Sblocca
+        </button>
+      </div>
+    </form>
+  );
+}
+
+type Entry = { kind: 'trip'; time: string; trip: Trip } | { kind: 'closed'; time: string; ride: Ride };
+
+/**
+ * Riga dell'elenco: orario, punto di ritiro, camere e la spunta per segnare «fatto» (due tocchi, per non
+ * sbagliare). Toccando la riga si apre la scheda grande con i messaggi per l'ospite.
+ */
+function TripRow({ trip: t, settings, now, clash, onOpen, onDone }: { trip: Trip; settings: ShuttleSettings; now: number; clash: boolean; onOpen: () => void; onDone: () => void }) {
+  const [armed, setArmed] = useState(false);
+  useEffect(() => {
+    if (!armed) return;
+    const id = window.setTimeout(() => setArmed(false), 4000);
+    return () => window.clearTimeout(id);
+  }, [armed]);
+  const unread = t.rides.some((r) => r.status === 'richiesta');
+  const arrivedRides = t.rides.filter((r) => r.status === 'sul_posto');
+  const firstArrived = [...arrivedRides].sort((a, b) => (a.arrivedAt ?? '').localeCompare(b.arrivedAt ?? ''))[0];
+  const wait = firstArrived ? waitState(firstArrived, settings, now) : null;
+  const depart = t.rides.map((r) => departState(r, now)).find(Boolean) ?? null;
+  const nameOf = useNameOf();
+  return (
+    <li className={cx('flex items-stretch overflow-hidden rounded-2xl bg-[var(--d-card)] text-[var(--d-ink)]', clash && 'ring-4 ring-[var(--d-warn)]')} data-trip={t.key}>
+      <button type="button" onClick={onOpen} aria-label={`Apri il viaggio delle ${t.time}, ${roomsWord(t)}${roomsOf(t, nameOf)}`} className="flex min-w-0 flex-1 items-center gap-3 px-3 py-3 text-left active:bg-black/5">
+        <span className="tnum w-[4.6rem] shrink-0 text-[1.75rem] font-black leading-none">{t.time}</span>
+        <span className="flex min-w-0 flex-1 flex-col items-start gap-1">
+          {depart ? (
+            <span className="blink-place inline-flex min-h-8 max-w-full items-center gap-1 rounded-[1.25rem] px-3 py-1 text-sm font-black leading-tight" aria-label={`Parti ora: pick-up ${pickupOf(t)}`}>
+              <MapPin size={14} className="shrink-0" aria-hidden />
+              <span className="min-w-0 break-words">{short(pickupOf(t))}</span>
+            </span>
+          ) : (
+            <PlacePill id={t.pickup} name={short(pickupOf(t))} settings={settings} size="sm" />
+          )}
+          <span className="text-base leading-snug">
+            <WhoInline rides={t.rides} />
+            <span className="block text-sm font-bold text-[var(--d-ink-soft)]">{t.persons} pers.</span>
+          </span>
+          {unread ? (
+            <StatusChip status="richiesta" />
+          ) : wait ? (
+            <span className="tnum text-sm font-black text-[#a55a00]">{wait.expired ? 'Attesa finita' : <>Sul posto · <Countdown ms={wait.remainingMs} /></>}</span>
+          ) : (
+            <span className="text-sm font-bold text-[var(--d-ink-soft)]">Sto andando</span>
+          )}
+        </span>
+        {clash ? <AlertTriangle size={24} className="shrink-0 text-[var(--d-warn)]" aria-label="Conflitto di orario" /> : null}
+      </button>
+      {unread ? (
+        <span className="flex w-16 shrink-0 items-center justify-center border-l-2 border-[var(--d-card-2)] text-[var(--d-ink-soft)]" aria-hidden>
+          <ChevronRight size={26} />
+        </span>
+      ) : (
+        <button
+          type="button"
+          onClick={() => (armed ? (setArmed(false), onDone()) : setArmed(true))}
+          aria-label={armed ? 'Conferma: fatto' : `Segna fatto: ${roomsWord(t)}${roomsOf(t, nameOf)}`}
+          className={cx('flex w-20 shrink-0 flex-col items-center justify-center gap-1 border-l-2 border-[var(--d-card-2)] font-black transition-colors', armed ? 'bg-[var(--d-ok)] text-white' : 'active:bg-black/5')}
+        >
+          {armed ? (
+            <>
+              <Check size={30} strokeWidth={3} aria-hidden />
+              <span className="text-xs uppercase">Conferma</span>
+            </>
+          ) : (
+            <span className="size-11 rounded-full border-[3px] border-[var(--d-ink)]" aria-hidden />
+          )}
+        </button>
+      )}
+    </li>
+  );
+}
+
+/** Corsa già chiusa, al suo orario: spunta verde se fatta, croce rossa se non presentato. */
+function ClosedRow({ ride: r, settings }: { ride: Ride; settings: ShuttleSettings }) {
+  const pickup = r.direction === 'andata' ? HOTEL_PICKUP : r.destinationId;
+  return (
+    <li className="flex items-center gap-3 rounded-2xl bg-[var(--d-card)]/75 px-3 py-2.5 text-[var(--d-ink)]">
+      <span className={cx('tnum w-[4.6rem] shrink-0 text-[1.75rem] font-black leading-none', r.status === 'annullata' && 'line-through opacity-60')}>{r.time}</span>
+      <span className="flex min-w-0 flex-1 flex-col items-start gap-1 opacity-80">
+        <PlacePill id={pickup} name={r.direction === 'andata' ? 'Hotel' : short(r.destinationName)} settings={settings} size="sm" />
+        <span className="text-base leading-snug">
+          <WhoInline rides={[r]} />
+          <span className="block text-sm font-bold text-[var(--d-ink-soft)]">{r.persons} pers.</span>
+        </span>
+      </span>
+      <span className="flex w-20 shrink-0 flex-col items-center justify-center gap-0.5 text-xs font-black uppercase" aria-label={CHIP[r.status].label}>
+        {r.status === 'completata' ? (
+          <span className="flex size-11 items-center justify-center rounded-full bg-[var(--d-ok)] text-white">
+            <Check size={26} strokeWidth={3} aria-hidden />
+          </span>
+        ) : r.status === 'no_show' ? (
+          <span className="flex size-11 items-center justify-center rounded-full bg-[var(--d-bad)] text-white">
+            <UserX size={22} aria-hidden />
+          </span>
+        ) : (
+          <StatusChip status={r.status} />
+        )}
+      </span>
+    </li>
   );
 }
 
@@ -353,33 +573,24 @@ function StatusChip({ status }: { status: RideStatus }) {
 
 function TripLine({ trip: t, settings, now, clash, onClick }: { trip: Trip; settings: ShuttleSettings | null; now?: number; clash?: boolean; onClick?: () => void }) {
   const depart = now === undefined ? null : (t.rides.map((r) => departState(r, now)).find(Boolean) ?? null);
-  const unread = t.rides.some((r) => r.status === 'richiesta');
   const content = (
     <>
       <span className="tnum w-16 shrink-0 text-2xl font-black">{t.time}</span>
-      <span className="flex min-w-0 flex-1 flex-col gap-1">
+      <span className="flex min-w-0 flex-1 flex-col items-start gap-1">
         {depart ? (
-          <span className="blink-place inline-flex min-h-8 max-w-full items-center gap-1 self-start rounded-[1.25rem] px-3 py-1 text-sm font-black leading-tight" aria-label={`Parti ora: pick-up ${pickupOf(t)}`}>
-            <Navigation size={14} className="shrink-0" aria-hidden />
+          <span className="blink-place inline-flex min-h-8 max-w-full items-center gap-1 rounded-[1.25rem] px-3 py-1 text-sm font-black leading-tight" aria-label={`Parti ora: pick-up ${pickupOf(t)}`}>
+            <MapPin size={14} className="shrink-0" aria-hidden />
             <span className="min-w-0 break-words">{pickupOf(t)}</span>
           </span>
         ) : (
-          <PlacePill id={t.pickup} name={pickupOf(t)} settings={settings} size="sm" className="self-start" />
+          <PlacePill id={t.pickup} name={short(pickupOf(t))} settings={settings} size="sm" />
         )}
-        <span className="text-sm font-bold text-[var(--d-ink-soft)]">
-          {t.rides.length > 1 ? 'Camere' : 'Camera'} {roomsOf(t)} · <Users size={13} className="inline" aria-hidden /> {t.persons}
+        <span className="text-base leading-snug">
+          <WhoInline rides={t.rides} />
+            <span className="block text-sm font-bold text-[var(--d-ink-soft)]">{t.persons} pers.</span>
         </span>
       </span>
-      {clash || unread ? (
-        <span className="flex shrink-0 flex-col items-end gap-1">
-          {unread ? <StatusChip status="richiesta" /> : null}
-          {clash ? (
-            <span className="inline-flex items-center gap-1 rounded-full bg-[var(--d-warn)] px-2 py-0.5 text-xs font-black uppercase" aria-label="Conflitto di orario">
-              <AlertTriangle size={13} aria-hidden /> Conflitto
-            </span>
-          ) : null}
-        </span>
-      ) : null}
+      {clash ? <AlertTriangle size={24} className="shrink-0 text-[var(--d-warn)]" aria-label="Conflitto di orario" /> : null}
     </>
   );
   const cls = 'flex min-h-16 w-full items-center gap-3 rounded-2xl bg-[var(--d-card)] px-3 py-2 text-left text-[var(--d-ink)]';
@@ -392,253 +603,198 @@ function TripLine({ trip: t, settings, now, clash, onClick }: { trip: Trip; sett
   );
 }
 
-/** Testo dei pulsanti: dice all'autista che cosa succede, cioè che l'ospite riceve l'avviso. */
-const ACTION_LABEL: Record<DriverMessageKind, [one: string, many: string]> = {
-  arrivato: ['Avvisa l’ospite che sei arrivato', 'Avvisa gli ospiti che sei arrivato'],
-  sette_minuti: ['Avvisa l’ospite: arrivo fra 7 minuti', 'Avvisa gli ospiti: arrivo fra 7 minuti'],
-  traffico: ['Avvisa l’ospite: c’è traffico', 'Avvisa gli ospiti: c’è traffico'],
-};
+/** Pulsante grande: uno solo per ogni momento del viaggio. */
+function BigButton({ tone, onClick, children }: { tone: 'go' | 'done'; onClick: () => void; children: React.ReactNode }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={cx(
+        'flex min-h-20 w-full items-center justify-center gap-3 rounded-full text-2xl font-black text-white shadow-md active:scale-[0.98]',
+        tone === 'go' ? 'bg-[var(--d-primary)]' : 'bg-[var(--d-ok)]',
+      )}
+    >
+      {children}
+    </button>
+  );
+}
 
-const MESSAGE_ICON: Record<DriverMessageKind, React.ReactNode> = {
-  arrivato: <MapPin size={24} />,
-  sette_minuti: <Clock size={24} />,
-  traffico: <TrafficCone size={24} />,
-};
-
+/**
+ * Un viaggio, ridotto all'essenziale per chi guida: orario, dove ritirare, camere e un solo pulsante grande
+ * che cambia a ogni passo. Sto andando (l'ospite legge «arrivo fra 7 minuti») → Sono arrivato → Fatto!
+ */
 function TripCard({ trip: t, clash, settings, now, act }: { trip: Trip; clash: Ride[]; settings: ShuttleSettings; now: number; act: Act }) {
   const { backend } = useApp();
   const staff = backend.staff;
-  const [noShowFor, setNoShowFor] = useState<string | null>(null);
+  const nameOf = useNameOf();
+  const [askNoShow, setAskNoShow] = useState<string | null>(null);
   const many = t.rides.length > 1;
   const arrivedRides = t.rides.filter((r) => r.status === 'sul_posto');
   const arrived = arrivedRides.length > 0;
+  const pending = t.rides.filter((r) => r.status === 'richiesta' || r.status === 'confermata');
   const unread = t.rides.some((r) => r.status === 'richiesta');
-  const toNotify = t.rides.filter((r) => r.status === 'richiesta' || r.status === 'confermata');
   const depart = t.rides.map((r) => departState(r, now)).find(Boolean) ?? null;
   const firstArrived = [...arrivedRides].sort((a, b) => (a.arrivedAt ?? '').localeCompare(b.arrivedAt ?? ''))[0];
   const wait = firstArrived ? waitState(firstArrived, settings, now) : null;
-  const last = t.rides.filter((r) => r.lastMessageAt).sort((a, b) => (b.lastMessageAt ?? '').localeCompare(a.lastMessageAt ?? ''))[0];
-  const drops = dropsOf(t);
-  const first = t.rides[0]!;
+  const notes = t.rides.filter((r) => r.note);
+  // Impianto del viaggio: il ritiro al ritorno, l'arrivo all'andata (se tutti vanno allo stesso impianto).
+  const liftId = t.direction === 'ritorno' ? t.pickup : new Set(t.rides.map((r) => r.destinationId)).size === 1 ? t.rides[0]!.destinationId : null;
+  const lift = liftId ? settings.destinations.find((d) => d.id === liftId) : undefined;
+  const meeting = lift && (hasMeetingPoint(lift) || t.direction === 'ritorno') ? lift : null;
+  const drops = dropsOf(t)
+    .map((d) => d.name)
+    .join(', ');
 
-  const notifyAll = (kind: DriverMessageKind) =>
-    act(
-      async () => {
-        for (const r of toNotify) await staff.driverMessage(r.id, kind);
-      },
-      unread ? (many ? 'Lettura confermata, ospiti avvisati.' : 'Lettura confermata, ospite avvisato.') : many ? 'Ospiti avvisati.' : 'Ospite avvisato.',
-    );
-  const doneAll = () =>
-    act(
-      async () => {
-        for (const r of arrivedRides) await staff.driverDone(r.id);
-      },
-      many ? `Viaggio completato: ${arrivedRides.length} ${arrivedRides.length === 1 ? 'camera' : 'camere'}.` : 'Corsa completata.',
-    );
+  const send = (kind: DriverMessageKind, ok: string) =>
+    act(async () => {
+      for (const r of pending) await staff.driverMessage(r.id, kind);
+    }, ok);
+  const finish = () =>
+    act(async () => {
+      for (const r of arrivedRides) await staff.driverDone(r.id);
+    }, many ? 'Viaggio completato.' : 'Corsa completata.');
+  const noShow = (r: Ride) => act(() => staff.driverNoShow(r.id), `${capital(whoLong(r, nameOf))}: segnalata alla reception come non presentata.`);
 
   return (
     <article
-      className={cx('flex flex-col gap-4 rounded-[28px] bg-[var(--d-card)] p-4 text-[var(--d-ink)] shadow-xl', unread && 'pulse', clash.length > 0 && 'ring-4 ring-[var(--d-warn)]')}
-      aria-label={`Viaggio delle ${t.time} da ${pickupOf(t)}, ${many ? 'camere' : 'camera'} ${roomsOf(t)}`}
+      className={cx('flex flex-col gap-4 rounded-[28px] bg-[var(--d-card)] p-5 text-[var(--d-ink)] shadow-xl', unread && 'pulse', clash.length > 0 && 'ring-4 ring-[var(--d-warn)]')}
+      aria-label={`Viaggio delle ${t.time} da ${pickupOf(t)}, ${roomsWord(t)}${roomsOf(t, nameOf)}`}
     >
-      <div className="flex items-start gap-3">
-        <div className="min-w-0">
-          <p className="text-xs font-black uppercase tracking-[0.18em] text-[var(--d-ink-soft)]">{unread ? 'Nuova · conferma la lettura' : arrived ? 'Sul posto' : depart ? 'Parti ora' : 'Adesso'}</p>
-          <p className="tnum text-[4.5rem] font-black leading-[0.95] tracking-tight">{t.time}</p>
-        </div>
-        <span className="ml-auto mt-1 shrink-0 rounded-full border-2 border-[var(--d-ink)] px-3 py-0.5 text-sm font-black uppercase tracking-wide">{t.direction === 'andata' ? 'Andata' : 'Ritorno'}</span>
+      <div className="flex items-center justify-between gap-3">
+        <p className="tnum text-[4.5rem] font-black leading-none tracking-tight">{t.time}</p>
+        {depart ? (
+          // Da 7 minuti prima dell'orario lampeggia finché l'autista non è sul posto.
+          <p className="blink-place shrink-0 rounded-full px-4 py-2 text-lg font-black" role="status" aria-label={`Parti ora: pick-up ${pickupOf(t)} ${departLabel(depart.minutesLeft)}`}>
+            Parti ora · {departLabel(depart.minutesLeft)}
+          </p>
+        ) : null}
       </div>
 
-      {/* La risposta a «chi devo andare a prendere?», scritta per esteso: chi, dove, dove portarli. */}
-      <div className="flex flex-col gap-2.5 rounded-2xl bg-[var(--d-card-2)] p-3.5">
-        <p className="text-xs font-black uppercase tracking-[0.18em] text-[var(--d-ink-soft)]">Vai a prendere</p>
-        <div>
-          <p className="text-[1.65rem] font-black leading-tight">
-            {many ? 'Camere' : 'Camera'} {roomsSpoken(t)}
-          </p>
-          <p className="inline-flex items-center gap-1.5 text-lg font-black">
-            <Users size={20} aria-hidden /> {t.persons} {t.persons === 1 ? 'persona' : 'persone'}
-          </p>
-        </div>
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
-          <span className="w-20 shrink-0 text-xs font-black uppercase tracking-[0.18em] text-[var(--d-ink-soft)]">Ritiro</span>
-          <PlacePill id={t.pickup} name={pickupOf(t)} settings={settings} size="lg" />
-        </div>
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
-          <span className="inline-flex w-20 shrink-0 items-center gap-1 text-xs font-black uppercase tracking-[0.18em] text-[var(--d-ink-soft)]">
-            Portali <ArrowRight size={14} aria-hidden />
-          </span>
-          {drops.map((d) => (
-            <PlacePill key={d.id} id={d.id} name={d.name} settings={settings} size="md" />
-          ))}
-        </div>
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+        <PlacePill id={t.pickup} name={pickupOf(t)} settings={settings} size="lg" />
+        <span className="inline-flex items-center gap-1 text-lg font-black text-[var(--d-ink-soft)]">
+          <ArrowRight size={20} aria-label="poi a" /> {drops}
+        </span>
       </div>
 
-      {depart ? (
-        // Da 7 minuti prima dell'orario: il luogo del pick-up lampeggia finché l'autista non è sul posto.
-        <p className="blink-place flex items-center gap-3 rounded-2xl px-4 py-3 font-black" role="status" aria-label={`Parti ora: pick-up ${pickupOf(t)} ${departLabel(depart.minutesLeft)}`}>
-          <Navigation size={26} className="shrink-0" aria-hidden />
-          <span className="min-w-0">
-            <span className="block text-xs uppercase tracking-[0.18em]">Parti ora · pick-up</span>
-            <span className="block truncate text-2xl leading-tight">{pickupOf(t)}</span>
-          </span>
-          <span className="tnum ml-auto shrink-0 text-right text-lg">{departLabel(depart.minutesLeft)}</span>
+      {/* Chi prendere: una riga per camera, numero grande e nome dell'ospite accanto. */}
+      <div className="flex flex-col gap-1">
+        <p className="text-xs font-black uppercase tracking-[0.16em] text-[var(--d-ink-soft)]">
+          Da prendere{many ? ` · ${t.persons} pers.` : ''}
         </p>
+        <ul className="flex flex-col gap-1">
+          {t.rides.map((r) => {
+            const name = isExtra(r) ? extraNameOf(r) : nameOf(r);
+            return (
+              <li key={r.id} className="flex items-baseline gap-2.5 leading-tight">
+                <span className="tnum shrink-0 text-[1.75rem] font-black">{isExtra(r) ? 'Extra' : r.room}</span>
+                <span className="min-w-0 flex-1 break-words text-xl font-black">{name ?? ''}</span>
+                <span className="shrink-0 whitespace-nowrap text-xl font-bold text-[var(--d-ink-soft)]">{r.persons} pers.</span>
+              </li>
+            );
+          })}
+        </ul>
+      </div>
+
+      {meeting ? (
+        // Meeting point all'impianto: dove caricare (ritorno) o lasciare (andata) gli ospiti, con la navigazione.
+        <div className="flex items-center gap-3 rounded-2xl bg-[var(--d-card-2)] p-3">
+          <span className="flex min-w-0 flex-1 flex-col">
+            <span className="text-xs font-black uppercase tracking-[0.16em] text-[var(--d-ink-soft)]">Meeting point {meeting.name}</span>
+            <span className="font-black leading-snug">{meeting.meetingPoint?.trim() || `${meeting.name}, ${meeting.place}`}</span>
+          </span>
+          <a href={mapHref(meeting)} target="_blank" rel="noopener noreferrer" className="flex min-h-12 shrink-0 items-center gap-2 rounded-full bg-[var(--d-ink)] px-4 font-black text-[var(--d-cream)] active:scale-[0.98]">
+            <Navigation size={18} aria-hidden /> Naviga
+          </a>
+        </div>
       ) : null}
+
+      {notes.map((r) => {
+        const text = r.room === 'EXTRA' ? (r.note ?? '').split(' · ').slice(1).join(' · ') : r.note;
+        return text ? (
+          <p key={r.id} className="-mt-2 italic text-[var(--d-ink-soft)]">
+            {many ? `${labelOf(r, nameOf)}: ` : ''}“{text}”
+          </p>
+        ) : null;
+      })}
 
       {clash.length ? (
-        <div role="alert" className="flex flex-col gap-1.5 rounded-2xl bg-[var(--d-warn)] px-4 py-3">
-          <p className="flex items-center gap-2 text-lg font-black">
-            <AlertTriangle size={22} className="shrink-0" aria-hidden /> Due viaggi nella stessa fascia
-          </p>
-          <ul className="flex flex-col gap-0.5 font-bold">
-            {clash.map((o) => (
-              <li key={o.id} className="tnum">
-                {o.time} · ritiro {o.direction === 'andata' ? 'Hotel' : o.destinationName} · camera {o.room}
-              </li>
-            ))}
-          </ul>
-          <p className="text-sm font-bold">Il mezzo non può essere in due posti: avvisa uno dei due ospiti («c’è traffico») e chiama la reception.</p>
-        </div>
-      ) : null}
-
-      {/* Camere del viaggio. */}
-      <ul className="flex flex-col divide-y-2 divide-[var(--d-card-2)] rounded-2xl border-2 border-[var(--d-card-2)]">
-        {t.rides.map((r) => (
-          <li key={r.id} className="flex flex-col gap-2 p-3">
-            <div className="flex items-center gap-3">
-              <span className="tnum flex h-12 min-w-14 items-center justify-center rounded-xl bg-[var(--d-ink)] px-2 text-2xl font-black text-[var(--d-cream)]" aria-label={`Camera ${r.room}`}>
-                {r.room}
-              </span>
-              {/* Persone e stato una sotto l'altro: restano leggibili anche sui telefoni stretti. */}
-              <span className="flex min-w-0 flex-1 flex-col items-start gap-1">
-                <span className="whitespace-nowrap text-lg font-black leading-tight">
-                  {r.persons} {r.persons === 1 ? 'persona' : 'persone'}
-                  {t.direction === 'andata' && drops.length > 1 ? <span className="text-sm font-bold text-[var(--d-ink-soft)]"> → {r.destinationName}</span> : null}
-                </span>
-                <StatusChip status={r.status} />
-              </span>
-            </div>
-            {r.note ? <p className="rounded-xl bg-[var(--d-card-2)] px-3 py-2 italic">“{r.note}”</p> : null}
-            {arrived && many ? (
-              r.status === 'sul_posto' ? (
-                noShowFor === r.id ? (
-                  <ConfirmRow
-                    question={`Camera ${r.room} non presentata?`}
-                    yes="Sì, non presentata"
-                    no="Aspetto ancora"
-                    onNo={() => setNoShowFor(null)}
-                    onYes={() => {
-                      setNoShowFor(null);
-                      void act(() => staff.driverNoShow(r.id), `Camera ${r.room}: segnalata alla reception come non presentata.`);
-                    }}
-                  />
-                ) : (
-                  <div className="flex gap-2">
-                    <button type="button" onClick={() => void act(() => staff.driverDone(r.id), `Camera ${r.room} a bordo.`)} className="flex min-h-12 flex-1 items-center justify-center gap-2 rounded-full bg-[var(--d-ok)] font-black text-white active:scale-[0.98]">
-                      <Check size={20} strokeWidth={3} /> A bordo
-                    </button>
-                    {wait?.expired ? (
-                      <button type="button" onClick={() => setNoShowFor(r.id)} className="flex min-h-12 flex-1 items-center justify-center gap-2 rounded-full border-2 border-[var(--d-bad)] font-black text-[var(--d-bad)] active:scale-[0.98]">
-                        <UserX size={20} /> Non presentato
-                      </button>
-                    ) : null}
-                  </div>
-                )
-              ) : r.status === 'richiesta' || r.status === 'confermata' ? (
-                <button type="button" onClick={() => void act(() => staff.driverMessage(r.id, 'arrivato'), `Camera ${r.room} avvisata.`)} className="flex min-h-12 items-center justify-center gap-2 rounded-full bg-[var(--d-primary)] font-black text-white">
-                  <MapPin size={18} /> Avvisa anche questa camera
-                </button>
-              ) : null
-            ) : null}
-          </li>
-        ))}
-      </ul>
-
-      {last?.lastMessage ? (
-        <p className="text-sm font-bold text-[var(--d-ink-soft)]">
-          {many ? 'Ospiti avvisati' : 'Ospite avvisato'} alle <span className="tnum">{romeTimeOf(last.lastMessageAt)}</span>: «{DRIVER_MESSAGE_LABEL[last.lastMessage]}»
+        <p role="alert" className="flex items-start gap-2 rounded-2xl bg-[var(--d-warn)] px-4 py-3 font-black">
+          <AlertTriangle size={22} className="mt-0.5 shrink-0" aria-hidden />
+          <span>
+            Alle {clash.map((o) => `${o.time} anche ${o.direction === 'andata' ? 'Hotel' : o.destinationName} (${labelOf(o, nameOf)})`).join(', ')}: chiama la reception.
+          </span>
         </p>
       ) : null}
 
       {!arrived ? (
-        // Prima dell'arrivo: i tre messaggi per gli ospiti (il primo tocco vale come conferma di lettura).
-        <div className="flex flex-col gap-2.5">
-          {(['arrivato', 'sette_minuti', 'traffico'] as DriverMessageKind[]).map((k, i) => (
-            <button
-              key={k}
-              type="button"
-              onClick={() => void notifyAll(k)}
-              className={cx(
-                'flex min-h-16 items-center gap-3 rounded-full px-5 text-left text-lg font-black leading-snug active:scale-[0.98]',
-                i === 0 ? 'bg-[var(--d-primary)] text-white shadow-md' : last?.lastMessage === k ? 'bg-[var(--d-ink)] text-[var(--d-cream)]' : 'border-2 border-[var(--d-ink)] bg-transparent text-[var(--d-ink)]',
-              )}
-            >
-              {MESSAGE_ICON[k]} <span>{ACTION_LABEL[k][many ? 1 : 0]}</span>
-            </button>
-          ))}
+        <div className="flex flex-col gap-2">
+          {unread ? (
+            <BigButton tone="go" onClick={() => void send('sette_minuti', 'Ospite avvisato: arrivi fra 7 minuti.')}>
+              <Car size={28} /> Sto andando
+            </BigButton>
+          ) : (
+            <>
+              <BigButton tone="go" onClick={() => void send('arrivato', 'Ospite avvisato: sei arrivato.')}>
+                <MapPin size={28} /> Sono arrivato
+              </BigButton>
+              <button type="button" onClick={() => void send('traffico', 'Ospite avvisato: c’è traffico.')} className="flex min-h-12 items-center justify-center gap-2 rounded-full border-2 border-[var(--d-ink)] font-black active:scale-[0.98]">
+                <TrafficCone size={20} /> C’è traffico
+              </button>
+            </>
+          )}
         </div>
       ) : (
-        // Sul posto: attesa, poi «Fatto!» alla consegna; dopo l'attesa massima, «non presentato».
         <div className="flex flex-col gap-3">
           {wait ? (
-            <div className="flex flex-col gap-2 rounded-2xl bg-[var(--d-card-2)] p-4">
-              <div className="flex items-baseline justify-between">
-                <span className="text-lg font-black">{wait.expired ? 'Attesa massima trascorsa' : 'Attesa'}</span>
-                <span className="tnum text-5xl font-black">{wait.expired ? `${settings.waitMinutes}:00` : <Countdown ms={wait.remainingMs} />}</span>
-              </div>
-              <div className="h-3 overflow-hidden rounded-full bg-[var(--d-card)]" aria-hidden>
-                <div className="h-full bg-[var(--d-primary)] transition-[width] duration-1000" style={{ width: `${100 - (wait.remainingMs / (settings.waitMinutes * 60000)) * 100}%` }} />
-              </div>
-            </div>
+            <p className="flex items-baseline justify-between rounded-2xl bg-[var(--d-card-2)] px-4 py-3">
+              <span className="text-lg font-black">{wait.expired ? 'Attesa finita' : 'Attesa'}</span>
+              <span className="tnum text-5xl font-black">{wait.expired ? `${settings.waitMinutes}:00` : <Countdown ms={wait.remainingMs} />}</span>
+            </p>
           ) : null}
-          <button type="button" onClick={() => void doneAll()} className="flex min-h-20 items-center justify-center gap-3 rounded-full bg-[var(--d-ok)] text-2xl font-black text-white shadow-md active:scale-[0.98]">
-            <Check size={30} strokeWidth={3} /> {many ? 'Fatto! Tutti a bordo' : 'Fatto!'}
-          </button>
-          {!many ? (
-            wait?.expired ? (
-              noShowFor ? (
-                <ConfirmRow
-                  question={`Camera ${first.room} non presentata: ripartire?`}
-                  yes="Sì, riparto"
-                  no="Aspetto ancora"
-                  onNo={() => setNoShowFor(null)}
-                  onYes={() => {
-                    setNoShowFor(null);
-                    void act(() => staff.driverNoShow(first.id), 'Segnalato alla reception: ospite non presentato.');
-                  }}
-                />
-              ) : (
-                <button type="button" onClick={() => setNoShowFor(first.id)} className="flex min-h-14 items-center justify-center gap-2 rounded-full border-2 border-[var(--d-bad)] text-lg font-black text-[var(--d-bad)] active:scale-[0.98]">
-                  <UserX size={22} /> Ospite non presentato · riparto
-                </button>
-              )
+          <BigButton tone="done" onClick={() => void finish()}>
+            <Check size={30} strokeWidth={3} /> Fatto!
+          </BigButton>
+          {pending.length ? (
+            <button type="button" onClick={() => void send('arrivato', 'Ospite avvisato: sei arrivato.')} className="flex min-h-12 items-center justify-center gap-2 rounded-full border-2 border-[var(--d-ink)] font-black">
+              <MapPin size={18} /> Sono arrivato anche per {pending.map((r) => labelOf(r, nameOf)).join(', ')}
+            </button>
+          ) : null}
+          {wait?.expired ? (
+            askNoShow ? (
+              <div className="flex flex-col gap-2 rounded-2xl bg-[var(--d-card-2)] p-3" role="alertdialog" aria-label="Conferma ospite non presentato">
+                <p className="font-black">{capital(whoLong(t.rides.find((r) => r.id === askNoShow) ?? t.rides[0]!, nameOf))} non presentata: ripartire?</p>
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const r = t.rides.find((x) => x.id === askNoShow);
+                      setAskNoShow(null);
+                      if (r) void noShow(r);
+                    }}
+                    className="flex min-h-12 flex-1 items-center justify-center rounded-full bg-[var(--d-bad)] font-black text-white"
+                  >
+                    Sì, riparto
+                  </button>
+                  <button type="button" onClick={() => setAskNoShow(null)} className="flex min-h-12 flex-1 items-center justify-center rounded-full border-2 border-[var(--d-ink)] font-black">
+                    Aspetto ancora
+                  </button>
+                </div>
+              </div>
             ) : (
-              <p className="text-center text-sm font-bold text-[var(--d-ink-soft)]">Dopo {settings.waitMinutes} minuti potrai segnalare l’ospite come non presentato.</p>
+              <div className="flex flex-wrap gap-2">
+                {arrivedRides.map((r) => (
+                  <button key={r.id} type="button" onClick={() => setAskNoShow(r.id)} className="flex min-h-12 flex-1 items-center justify-center gap-2 rounded-full border-2 border-[var(--d-bad)] px-3 font-black text-[var(--d-bad)]">
+                    <UserX size={20} /> {many ? `${labelOf(r, nameOf)} non c’è` : 'Non si è presentato'}
+                  </button>
+                ))}
+              </div>
             )
           ) : (
-            <p className="text-center text-sm font-bold text-[var(--d-ink-soft)]">
-              {wait?.expired ? 'Segna «a bordo» chi è salito e «non presentato» chi manca.' : `Dopo ${settings.waitMinutes} minuti potrai segnalare chi non si presenta.`}
-            </p>
+            <p className="text-center text-sm font-bold text-[var(--d-ink-soft)]">Dopo {settings.waitMinutes} minuti puoi segnalare chi non si presenta.</p>
           )}
         </div>
       )}
     </article>
-  );
-}
-
-function ConfirmRow({ question, yes, no, onYes, onNo }: { question: string; yes: string; no: string; onYes: () => void; onNo: () => void }) {
-  return (
-    <div className="flex flex-col gap-2 rounded-2xl bg-[var(--d-card-2)] p-3" role="alertdialog" aria-label={question}>
-      <p className="font-black">{question}</p>
-      <div className="flex gap-2">
-        <button type="button" onClick={onYes} className="flex min-h-12 flex-1 items-center justify-center rounded-full bg-[var(--d-bad)] font-black text-white">
-          {yes}
-        </button>
-        <button type="button" onClick={onNo} className="flex min-h-12 flex-1 items-center justify-center rounded-full border-2 border-[var(--d-ink)] font-black">
-          {no}
-        </button>
-      </div>
-    </div>
   );
 }

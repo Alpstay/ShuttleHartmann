@@ -12,7 +12,9 @@ import {
   earliestSlot,
   groupBySlot,
   groupTrips,
+  inServiceHours,
   rideConflicts,
+  serviceHoursLabel,
   suggestTimes,
   normalizeRoom,
   pickupPlace,
@@ -280,5 +282,25 @@ describe('il mezzo è uno solo: viaggi', () => {
     expect(c.get('e')!.map((x) => x.id).sort()).toEqual(['a', 'b']);
     const full = rideConflicts([r('g', '10:00', 'andata', 'seceda', 5), r('h', '10:00', 'andata', 'palmer', 4)], S);
     expect([...full.keys()].sort()).toEqual(['g', 'h']); // stesso viaggio oltre gli 8 posti
+  });
+});
+
+describe('orari spezzati: 08:00–11:30 e 14:00–17:30', () => {
+  const S = DEFAULT_SETTINGS;
+  it('la pausa di metà giornata è fuori servizio, gli estremi no', () => {
+    expect(serviceHoursLabel(S)).toBe('08:00–11:30 · 14:00–17:30');
+    expect(['08:00', '11:30', '14:00', '17:30'].every((t) => inServiceHours(t, S))).toBe(true);
+    expect(['07:55', '11:35', '12:30', '13:55', '17:35'].some((t) => inServiceHours(t, S))).toBe(false);
+    expect(validateRideInput(input({ serviceDate: addDays(TODAY, 1), time: '12:30' }), { settings: S, nowMs: NOW, actor: 'ospite' })).toContain('fuori_orario_servizio');
+    expect(serviceHoursLabel({ ...S, pauseStart: '', pauseEnd: '' })).toBe('08:00–17:30');
+    expect(inServiceHours('12:30', { ...S, pauseStart: '', pauseEnd: '' })).toBe(true);
+  });
+  it('primo orario e orari proposti saltano la pausa', () => {
+    const at1125 = Date.parse('2026-10-17T09:25:00Z'); // 11:25 a Ortisei: con 15 minuti di anticipo si va alle 14:00
+    expect(earliestSlot(S, at1125, TODAY, 'ospite')).toBe('14:00');
+    expect(earliestSlot(S, at1125, TODAY, 'reception')).toBe('11:25');
+    const s = suggestTimes({ serviceDate: addDays(TODAY, 1), time: '11:30', direction: 'andata', destinationId: 'seceda', persons: 2 }, [{ time: '11:30', pickup: 'hotel', persons: 8 }], S, NOW, 'ospite');
+    expect(s.every((x) => inServiceHours(x.time, S))).toBe(true);
+    expect(s.map((x) => x.time)).toEqual(['11:05', '11:10', '14:00', '14:05']);
   });
 });

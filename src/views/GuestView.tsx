@@ -1,11 +1,12 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { AlertTriangle, ArrowDownLeft, ArrowLeft, ArrowUpRight, Bell, BellOff, Check, Clock, Globe, LogOut, Mountain, Plus, Users, WifiOff, X } from 'lucide-react';
+import { AlertTriangle, ArrowDownLeft, ArrowLeft, ArrowUpRight, Bell, BellOff, Check, Clock, Globe, Info, LogOut, MapPin, Mountain, Phone, Plus, Users, WifiOff, X } from 'lucide-react';
 import { GUEST_STRINGS, LANGS, detectLang, type GuestStrings, type Lang } from '../domain/i18n';
-import { canGuestCancel, compareRides, earliestSlot, isOpen, suggestTimes, suggestedTime, tripClashes, validateRideInput, type RideInputProblem } from '../domain/rules';
+import { canGuestCancel, compareRides, earliestSlot, isOpen, serviceHoursLabel, suggestTimes, suggestedTime, tripClashes, validateRideInput, type RideInputProblem } from '../domain/rules';
 import { addDays, formatShortDate, romeDate, romeTime, romeTimeOf, toMinutes } from '../domain/time';
 import type { BusySlot, Direction, GuestSession, IsoDate, Ride, RideInput, ShuttleSettings } from '../domain/types';
 import { ShuttleError } from '../domain/types';
 import { Button, Countdown, InlineConfirm, Pill, STATUS_TONE, Stepper, chime, cx, unlockSound, useApp, useLocalState, useNow, useOnline, useToast } from '../ui/kit';
+import { hasMeetingPoint, mapHref } from '../ui/destinations';
 import { AlpstayLogo } from '../ui/Logo';
 import { PinPad } from '../ui/PinPad';
 
@@ -61,14 +62,15 @@ export function GuestView({ autoLogin, onAutoLoginUsed, sessionKey = 'shuttle-ha
   if (!session) {
     return (
       <GuestShell>
-        <header className="flex justify-end px-4 pt-4">{langSwitch}</header>
-        <div className="flex flex-col items-center gap-4 px-4 pb-2 text-center">
-          <AlpstayLogo variant="completo" title="AlpStay · Be free. Stay true" className="h-auto w-48 text-fg" />
-          <div>
-            <p className="eyebrow">{t.hotel}</p>
-            <h1 className="text-[1.6rem] leading-tight text-gold">{t.appTitle}</h1>
+        {/* Pagina compatta: logo, titolo e lingua su una riga, tastierino sotto, tutto senza scorrere. */}
+        <header className="flex items-center gap-3 px-4 pt-3">
+          <AlpstayLogo variant="nome" title="AlpStay" className="h-11 w-auto shrink-0 text-fg" />
+          <div className="mr-auto min-w-0">
+            <p className="eyebrow truncate">{t.hotel}</p>
+            <h1 className="truncate text-[1.35rem] leading-tight text-gold">{t.appTitle}</h1>
           </div>
-        </div>
+          {langSwitch}
+        </header>
         <GuestLogin t={t} error={loginError} onLogin={login} />
       </GuestShell>
     );
@@ -92,8 +94,9 @@ export function GuestView({ autoLogin, onAutoLoginUsed, sessionKey = 'shuttle-ha
 function GuestLogin({ t, error, onLogin }: { t: GuestStrings; error: string | null; onLogin: (room: string) => Promise<void> }) {
   const [busy, setBusy] = useState(false);
   return (
-    <main className="flex flex-col px-4 pb-8 pt-4">
+    <main className="flex flex-col px-4 pb-4 pt-3">
       <PinPad
+        compact
         id="guest-room"
         label={t.room}
         hint={t.loginIntro}
@@ -131,7 +134,7 @@ function HeaderButton({ label, active, children, ...rest }: React.ButtonHTMLAttr
       type="button"
       {...rest}
       className={cx(
-        'flex min-h-14 min-w-14 flex-col items-center justify-center gap-0.5 rounded-2xl px-1.5 text-[0.7rem] font-black uppercase tracking-wide transition-transform active:scale-[0.96]',
+        'flex min-h-14 min-w-14 flex-col items-center justify-center gap-0.5 rounded-2xl px-1.5 text-[0.7rem] font-black uppercase tracking-wide transition-transform active:scale-[0.96] disabled:opacity-45',
         active ? 'bg-fg text-bg' : 'border border-line bg-surface text-fg',
       )}
     >
@@ -158,6 +161,7 @@ function GuestHome({ t, session, langSwitch, onLogout, onExpired }: { t: GuestSt
   const [rides, setRides] = useState<Ride[]>([]);
   const [sound, setSound] = useLocalState('shuttle-guest-sound', false);
   const [booking, setBooking] = useState(false);
+  const [showInfo, setShowInfo] = useState(false);
   const [flash, setFlash] = useState<string | null>(null);
   const [toast, showToast] = useToast();
   const last = useRef<Map<string, string> | null>(null);
@@ -223,6 +227,8 @@ function GuestHome({ t, session, langSwitch, onLogout, onExpired }: { t: GuestSt
     void refresh();
   };
 
+  if (showInfo && settings) return <GuestInfo t={t} settings={settings} onClose={() => setShowInfo(false)} />;
+
   if (booking && settings) {
     return (
       <BookingWizard
@@ -267,6 +273,9 @@ function GuestHome({ t, session, langSwitch, onLogout, onExpired }: { t: GuestSt
             {sound ? <Bell size={22} aria-hidden /> : <BellOff size={22} aria-hidden />}
           </HeaderButton>
           {langSwitch}
+          <HeaderButton label={t.info} aria-label={t.infoTitle} title={t.infoTitle} disabled={!settings} onClick={() => void loadSettings().then(() => setShowInfo(true))}>
+            <Info size={22} aria-hidden />
+          </HeaderButton>
           <HeaderButton label={t.logout} aria-label={t.logout} title={t.logout} onClick={onLogout}>
             <LogOut size={22} aria-hidden />
           </HeaderButton>
@@ -316,6 +325,128 @@ function GuestHome({ t, session, langSwitch, onLogout, onExpired }: { t: GuestSt
   );
 }
 
+/** Informazioni generali per l'ospite: orari, come funziona, meeting point, posti, taxi e reception. */
+function GuestInfo({ t, settings, onClose }: { t: GuestStrings; settings: ShuttleSettings; onClose: () => void }) {
+  const lifts = settings.destinations.filter((d) => d.active);
+  const recTel = settings.receptionPhone.replace(/[^\d+]/g, '');
+  const taxiTel = settings.taxiPhone.replace(/[^\d+]/g, '');
+  return (
+    <GuestShell>
+      <header className="flex items-center gap-2 px-2 pb-1 pt-3">
+        <Button size="md" tone="ghost" aria-label={t.close} onClick={onClose}>
+          <ArrowLeft size={22} />
+        </Button>
+        <h2 className="text-[1.5rem] leading-tight">{t.infoTitle}</h2>
+      </header>
+      <main className="flex flex-col gap-5 px-4 pb-8 pt-2">
+        <section className="flex flex-col gap-1.5">
+          <h3 className="eyebrow">{t.infoHours}</h3>
+          <p className="tnum whitespace-pre-line font-title text-3xl leading-tight">{serviceHoursLabel(settings).replace(' · ', '\n')}</p>
+        </section>
+
+        <section className="flex flex-col gap-2">
+          <h3 className="eyebrow">{t.infoHow}</h3>
+          <ol className="flex flex-col gap-2">
+            {t.infoSteps(settings.waitMinutes).map((step, i) => (
+              <li key={i} className="flex gap-3 rounded-xl bg-surface p-3 leading-snug">
+                <span className="flex size-7 shrink-0 items-center justify-center rounded-full bg-gold font-bold text-on-gold">{i + 1}</span>
+                <span>{step}</span>
+              </li>
+            ))}
+          </ol>
+          <p className="text-sm text-muted">{t.infoSeats(settings.seats)}</p>
+        </section>
+
+        <section className="flex flex-col gap-2">
+          <h3 className="eyebrow">{t.infoMeeting}</h3>
+          <ul className="flex flex-col divide-y divide-line rounded-2xl border border-line">
+            {lifts.map((d) => (
+              <li key={d.id} className="flex items-center gap-3 p-3">
+                <MapPin size={20} className="shrink-0 text-gold" aria-hidden />
+                <span className="flex min-w-0 flex-1 flex-col leading-tight">
+                  <span className="font-bold">{d.name}</span>
+                  <span className="text-sm text-muted">{d.meetingPoint?.trim() || d.place}</span>
+                </span>
+                <a href={mapHref(d)} target="_blank" rel="noopener noreferrer" className="shrink-0 text-sm font-bold text-gold underline">
+                  {t.openMap}
+                </a>
+              </li>
+            ))}
+          </ul>
+        </section>
+
+        {settings.taxiPhone.trim() ? (
+          <section className="flex flex-col gap-2">
+            <h3 className="eyebrow">{t.infoOutside}</h3>
+            <a href={`tel:${taxiTel}`} className="flex min-h-14 items-center gap-3 rounded-xl border border-line px-4 py-2">
+              <Phone size={20} className="shrink-0 text-gold" aria-hidden />
+              <span className="flex flex-col leading-tight">
+                <span className="text-sm font-bold">{settings.taxiName || 'Taxi'}</span>
+                <span className="tnum text-lg font-bold">{settings.taxiPhone}</span>
+              </span>
+            </a>
+          </section>
+        ) : null}
+
+        {settings.receptionPhone.trim() ? (
+          <section className="flex flex-col gap-2">
+            <h3 className="eyebrow">{t.infoReception}</h3>
+            <a href={`tel:${recTel}`} className="flex min-h-14 items-center gap-3 rounded-xl border border-line px-4 py-2">
+              <Phone size={20} className="shrink-0 text-gold" aria-hidden />
+              <span className="tnum text-lg font-bold">{settings.receptionPhone}</span>
+            </a>
+          </section>
+        ) : null}
+      </main>
+    </GuestShell>
+  );
+}
+
+/** Fuori orario: orari della navetta e taxi da chiamare, con il numero che si tocca per telefonare. */
+function TaxiBox({ t, settings, title }: { t: GuestStrings; settings: ShuttleSettings; title?: string }) {
+  const tel = settings.taxiPhone.replace(/[^\d+]/g, '');
+  return (
+    <div role="alert" className="flex flex-col gap-2 rounded-2xl border-2 border-warn bg-warn-soft p-4">
+      {title ? (
+        <p className="flex items-start gap-2 font-bold text-warn">
+          <AlertTriangle size={20} className="mt-0.5 shrink-0" aria-hidden /> {title}
+        </p>
+      ) : null}
+      <p className="tnum text-sm font-bold">{t.serviceHours(serviceHoursLabel(settings))}</p>
+      {settings.taxiPhone.trim() ? (
+        <>
+          <p className="text-sm">{t.taxiHint(settings.taxiName || 'Taxi')}</p>
+          <a href={`tel:${tel}`} className="flex min-h-14 items-center justify-center gap-3 rounded-xl bg-fg px-4 py-2 text-bg">
+            <Phone size={22} className="shrink-0" aria-hidden />
+            <span className="flex flex-col leading-tight">
+              {settings.taxiName ? <span className="text-sm font-bold">{settings.taxiName}</span> : null}
+              <span className="tnum text-lg font-bold">{settings.taxiPhone}</span>
+            </span>
+          </a>
+        </>
+      ) : null}
+    </div>
+  );
+}
+
+/** Meeting point all'impianto con il collegamento alla mappa (solo se la reception l'ha indicato). */
+function MeetingPoint({ t, settings, destinationId }: { t: GuestStrings; settings: ShuttleSettings; destinationId: string }) {
+  const d = settings.destinations.find((x) => x.id === destinationId);
+  if (!d || !hasMeetingPoint(d)) return null;
+  return (
+    <div className="flex items-start gap-3 rounded-xl border border-line p-3">
+      <MapPin size={22} className="mt-0.5 shrink-0 text-gold" aria-hidden />
+      <div className="flex min-w-0 flex-1 flex-col gap-1">
+        <p className="eyebrow">{t.meetingPoint}</p>
+        {d.meetingPoint?.trim() ? <p className="font-bold leading-snug">{d.meetingPoint}</p> : null}
+        <a href={mapHref(d)} target="_blank" rel="noopener noreferrer" className="self-start text-sm font-bold text-gold underline">
+          {t.openMap}
+        </a>
+      </div>
+    </div>
+  );
+}
+
 function dayLabel(t: GuestStrings, date: IsoDate, today: IsoDate): string {
   return date === today ? t.today : date === addDays(today, 1) ? t.tomorrow : formatShortDate(date);
 }
@@ -347,6 +478,8 @@ function HeroRide({ t, ride: r, settings, now, today, highlight, onCancel }: { t
         {r.direction === 'andata' ? <ArrowUpRight size={20} className="text-gold" aria-hidden /> : <ArrowDownLeft size={20} className="text-gold" aria-hidden />}
         {route(t, r)}
       </p>
+      {/* Al ritorno l'ospite deve sapere dove aspettare la navetta all'impianto. */}
+      {r.direction === 'ritorno' ? <MeetingPoint t={t} settings={settings} destinationId={r.destinationId} /> : null}
 
       {r.lastMessage ? (
         <div className="flex items-start gap-3 rounded-xl bg-gold-soft p-4" role="status">
@@ -584,7 +717,7 @@ function BookingWizard({
                   <Mountain size={22} className="text-gold" aria-hidden />
                   <span className="flex flex-col leading-tight">
                     <span className="text-lg font-bold">{d.name}</span>
-                    <span className="text-sm text-muted">{d.place}</span>
+                    <span className="text-sm text-muted">{d.meetingPoint?.trim() ? `${d.place} · ${d.meetingPoint}` : d.place}</span>
                   </span>
                 </button>
               ))}
@@ -611,7 +744,12 @@ function BookingWizard({
                 </button>
               ))}
             </div>
-            {!todayOpen ? <p className="-mt-3 text-sm text-muted">{t.noSlots}</p> : null}
+            {!todayOpen ? (
+              <div className="-mt-2 flex flex-col gap-2">
+                <p className="text-sm text-muted">{t.noSlots}</p>
+                <TaxiBox t={t} settings={settings} />
+              </div>
+            ) : null}
             <div>
               <label htmlFor="guest-time" className="eyebrow mb-1.5 block">
                 {t.time}
@@ -626,10 +764,9 @@ function BookingWizard({
                 onChange={(e) => pickTime(e.target.value)}
                 className="tnum h-16 w-full rounded-2xl border border-line bg-bg px-4 text-center font-title text-4xl"
               />
-              <p className="mt-1.5 text-sm text-muted">
-                {earliest ?? settings.serviceStart}–{settings.serviceEnd}
-              </p>
+              <p className="tnum mt-1.5 text-sm text-muted">{serviceHoursLabel(settings)}</p>
             </div>
+            {time && timeProblems.includes('fuori_orario_servizio') ? <TaxiBox t={t} settings={settings} title={t.outOfServiceTitle} /> : null}
             {time && trip.problem && !timeProblems.length ? (
               <div role="alert" className="-mt-2 flex flex-col gap-3 rounded-2xl border-2 border-warn bg-warn-soft p-4">
                 <p className="flex items-start gap-2 font-bold text-warn">
@@ -662,7 +799,7 @@ function BookingWizard({
               <p className="eyebrow mb-1.5">{t.persons}</p>
               <Stepper label={t.persons} value={persons} min={1} max={settings.seats} onChange={setPersons} />
             </div>
-            {time && timeProblems.length ? (
+            {time && timeProblems.length && !timeProblems.includes('fuori_orario_servizio') ? (
               <p role="alert" className="rounded-xl bg-bad-soft p-3 text-sm font-bold text-bad">
                 {t.problems[timeProblems[0] as RideInputProblem]}
               </p>
@@ -690,6 +827,8 @@ function BookingWizard({
                 </button>
               </div>
             </div>
+
+            {direction === 'ritorno' ? <MeetingPoint t={t} settings={settings} destinationId={destinationId} /> : null}
 
             {noteOpen ? (
               <div>

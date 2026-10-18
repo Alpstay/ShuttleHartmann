@@ -46,6 +46,10 @@ export interface Destination {
   /** Località della stazione a valle, es. «Ortisei». */
   place: string;
   active: boolean;
+  /** Meeting point all'impianto: dove l'ospite aspetta la navetta e dove l'autista lo carica (facoltativo). */
+  meetingPoint?: string;
+  /** Posizione del meeting point: link di Google Maps, coordinate («46.5745, 11.6713») o indirizzo. */
+  mapLink?: string;
 }
 
 /**
@@ -67,6 +71,12 @@ export interface ShuttleSettings {
   /** Prima e ultima corsa prenotabile. */
   serviceStart: HhMm;
   serviceEnd: HhMm;
+  /** Pausa di metà giornata (es. 11:30–14:00): l'ultima corsa del mattino è pauseStart, la prima del pomeriggio pauseEnd. Vuote = nessuna pausa. */
+  pauseStart: HhMm | '';
+  pauseEnd: HhMm | '';
+  /** Taxi da proporre all'ospite fuori dagli orari della navetta. */
+  taxiName: string;
+  taxiPhone: string;
   /** Anticipo minimo con cui l'ospite può prenotare per oggi. */
   minLeadMinutes: number;
   /** Numero della reception mostrato all'ospite per modifiche dopo la conferma (facoltativo). */

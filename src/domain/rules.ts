@@ -28,16 +28,21 @@ export const DEFAULT_SETTINGS: ShuttleSettings = {
   rooms: [...HARTMANN_ROOMS],
   guestAccess: 'camere_occupate',
   destinations: [
-    { id: 'seceda', name: 'Seceda', place: 'Ortisei', active: true },
-    { id: 'alpe-di-siusi', name: 'Alpe di Siusi', place: 'Ortisei', active: true },
-    { id: 'palmer', name: 'Palmer (Campetti scuola)', place: 'Ortisei', active: true },
-    { id: 'col-raiser', name: 'Col Raiser (Gardena Ronda/Saslong)', place: 'S. Cristina', active: true },
-    { id: 'monte-pana', name: 'Monte Pana', place: 'S. Cristina', active: true },
+    // Meeting point iniziali: stazioni a valle degli impianti. La reception li precisa da Impostazioni → Impianti.
+    { id: 'seceda', name: 'Seceda', place: 'Ortisei', active: true, meetingPoint: 'Stazione a valle della funivia Ortisei–Seceda', mapLink: 'Funivia Ortisei Seceda, Ortisei' },
+    { id: 'alpe-di-siusi', name: 'Alpe di Siusi', place: 'Ortisei', active: true, meetingPoint: 'Stazione a valle della cabinovia Ortisei–Alpe di Siusi', mapLink: 'Cabinovia Ortisei Alpe di Siusi, Ortisei' },
+    { id: 'palmer', name: 'Palmer (Campetti scuola)', place: 'Ortisei', active: true, meetingPoint: '', mapLink: '' },
+    { id: 'col-raiser', name: 'Col Raiser (Gardena Ronda/Saslong)', place: 'S. Cristina', active: true, meetingPoint: 'Stazione a valle della cabinovia Col Raiser', mapLink: 'Cabinovia Col Raiser, Santa Cristina Valgardena' },
+    { id: 'monte-pana', name: 'Monte Pana', place: 'S. Cristina', active: true, meetingPoint: '', mapLink: '' },
   ],
   seats: 8,
   waitMinutes: 5,
   serviceStart: '08:00',
   serviceEnd: '17:30',
+  pauseStart: '11:30',
+  pauseEnd: '14:00',
+  taxiName: 'Taxi Fleur',
+  taxiPhone: '+39 335 63 45 264',
   minLeadMinutes: 15,
   receptionPhone: '',
   pickupGapMinutes: 20,
@@ -103,7 +108,7 @@ export function validateRideInput(input: RideInput, ctx: ValidationContext): Rid
     problems.push('orario_non_valido');
   } else {
     const t = toMinutes(input.time);
-    if (t < toMinutes(settings.serviceStart) || t > toMinutes(settings.serviceEnd)) {
+    if (!inServiceHours(input.time, settings)) {
       problems.push('fuori_orario_servizio');
     }
     if (input.serviceDate === today) {
@@ -124,7 +129,39 @@ export function validateRideInput(input: RideInput, ctx: ValidationContext): Rid
   return problems;
 }
 
-/** Primo orario prenotabile per una data, arrotondato al passo di 5 minuti. */
+type ServiceHours = Pick<ShuttleSettings, 'serviceStart' | 'serviceEnd' | 'pauseStart' | 'pauseEnd'>;
+
+/** Pausa di metà giornata in minuti, se impostata correttamente. */
+function pauseOf(s: ServiceHours): [number, number] | null {
+  if (!s.pauseStart || !s.pauseEnd || !isValidHhMm(s.pauseStart) || !isValidHhMm(s.pauseEnd)) return null;
+  const a = toMinutes(s.pauseStart);
+  const b = toMinutes(s.pauseEnd);
+  return a < b ? [a, b] : null;
+}
+
+/** Vero se l'orario è dentro il servizio: dalla prima all'ultima corsa, esclusa la pausa (estremi compresi nel servizio). */
+export function inServiceHours(time: HhMm, s: ServiceHours): boolean {
+  if (!isValidHhMm(time)) return false;
+  const t = toMinutes(time);
+  if (t < toMinutes(s.serviceStart) || t > toMinutes(s.serviceEnd)) return false;
+  const pause = pauseOf(s);
+  return !(pause && t > pause[0] && t < pause[1]);
+}
+
+/** «08:00–11:30 · 14:00–17:30», oppure «08:00–17:30» senza pausa. */
+export function serviceHoursLabel(s: ServiceHours): string {
+  const pause = pauseOf(s);
+  return pause ? `${s.serviceStart}–${s.pauseStart} · ${s.pauseEnd}–${s.serviceEnd}` : `${s.serviceStart}–${s.serviceEnd}`;
+}
+
+/** Porta un orario (in minuti) fuori dalla pausa: avanti alla ripresa del servizio, o indietro all'ultima corsa del mattino. */
+function skipPause(m: number, s: ServiceHours, forward = true): number {
+  const pause = pauseOf(s);
+  if (!pause || m <= pause[0] || m >= pause[1]) return m;
+  return forward ? pause[1] : pause[0];
+}
+
+/** Primo orario prenotabile per una data, arrotondato al passo di 5 minuti (salta la pausa di metà giornata). */
 export function earliestSlot(settings: ShuttleSettings, nowMs: number, date: IsoDate, actor: Actor): HhMm | null {
   const start = toMinutes(settings.serviceStart);
   const end = toMinutes(settings.serviceEnd);
@@ -134,6 +171,7 @@ export function earliestSlot(settings: ShuttleSettings, nowMs: number, date: Iso
     const min = romeMinutesOfDay(nowMs) + lead;
     first = Math.max(start, Math.ceil(min / SLOT_STEP_MINUTES) * SLOT_STEP_MINUTES);
   }
+  first = skipPause(first, settings);
   return first > end ? null : fromMinutes(first);
 }
 
@@ -148,7 +186,7 @@ export function suggestedTime(
   const earliest = earliestSlot(settings, nowMs, date, actor);
   if (!earliest) return null;
   const preferred = direction === 'andata' ? '09:00' : '16:00';
-  const t = Math.max(toMinutes(preferred), toMinutes(earliest));
+  const t = skipPause(Math.max(toMinutes(preferred), toMinutes(earliest)), settings);
   return t > toMinutes(settings.serviceEnd) ? earliest : fromMinutes(t);
 }
 
@@ -165,7 +203,7 @@ export function shiftTime(
   const lo = earliest ? toMinutes(earliest) : toMinutes(settings.serviceStart);
   const hi = toMinutes(settings.serviceEnd);
   const next = Math.min(hi, Math.max(lo, toMinutes(time) + delta));
-  return fromMinutes(next);
+  return fromMinutes(skipPause(next, settings, delta >= 0));
 }
 
 // ---------------------------------------------------------------------------
@@ -178,6 +216,25 @@ export function shiftTime(
 // Stesse regole in shuttle_trip_problem() di supabase/schema.sql.
 
 export const HOTEL_PICKUP = 'hotel';
+
+/** Corsa extra inserita dalla reception per chi non è ospite dell'Hartmann: «camera» convenzionale. */
+export const EXTRA_ROOM = 'EXTRA';
+
+export function isExtra(r: Pick<Ride, 'room'>): boolean {
+  return r.room === EXTRA_ROOM;
+}
+
+/** Chi viaggia: il numero di camera, oppure «Extra · nome» (per le corse extra il nome apre la nota). */
+export function rideWho(r: Pick<Ride, 'room' | 'note'>): string {
+  if (!isExtra(r)) return r.room;
+  const name = (r.note ?? '').split(' · ')[0]?.trim();
+  return name ? `Extra · ${name}` : 'Extra';
+}
+
+/** «camera 105» oppure «Extra · Rossi», per i testi degli avvisi. */
+export function whoText(r: Pick<Ride, 'room' | 'note'>): string {
+  return isExtra(r) ? rideWho(r) : `camera ${r.room}`;
+}
 
 type TripFields = Pick<Ride, 'serviceDate' | 'time' | 'direction' | 'destinationId'>;
 
@@ -268,7 +325,7 @@ export function suggestTimes(
   const lo = toMinutes(earliest);
   const hi = toMinutes(settings.serviceEnd);
   const want = isValidHhMm(input.time) ? toMinutes(input.time) : lo;
-  const ok = (m: number) => m >= lo && m <= hi && checkTrip({ ...input, time: fromMinutes(m) }, busy, settings) === null;
+  const ok = (m: number) => m >= lo && m <= hi && inServiceHours(fromMinutes(m), settings) && checkTrip({ ...input, time: fromMinutes(m) }, busy, settings) === null;
   const pickup = pickupKey(input);
   const found = new Map<HhMm, TimeSuggestion>();
   for (const b of busy) {
@@ -278,10 +335,14 @@ export function suggestTimes(
     const time = fromMinutes(m);
     if (m !== want && !found.has(time) && ok(m)) found.set(time, { time, join: false });
   }
-  return [...found.values()]
-    .sort((a, b) => Math.abs(toMinutes(a.time) - want) - Math.abs(toMinutes(b.time) - want) || Number(b.join) - Number(a.join))
-    .slice(0, max)
-    .sort((a, b) => a.time.localeCompare(b.time));
+  // Metà prima e metà dopo l'orario chiesto (i più vicini), poi si completa con i restanti più vicini:
+  // così compare sempre anche la prima possibilità dopo una pausa o un viaggio pieno.
+  const near = (a: TimeSuggestion, b: TimeSuggestion) => Math.abs(toMinutes(a.time) - want) - Math.abs(toMinutes(b.time) - want) || Number(b.join) - Number(a.join);
+  const all = [...found.values()].sort(near);
+  const half = Math.ceil(max / 2);
+  const picked = [...all.filter((x) => toMinutes(x.time) < want).slice(0, half), ...all.filter((x) => toMinutes(x.time) > want).slice(0, half)];
+  for (const x of all) if (picked.length < max && !picked.includes(x)) picked.push(x);
+  return picked.slice(0, max).sort((a, b) => a.time.localeCompare(b.time));
 }
 
 /**

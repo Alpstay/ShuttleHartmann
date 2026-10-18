@@ -77,6 +77,10 @@ interface SettingsRow {
   min_lead_minutes: number;
   reception_phone: string;
   pickup_gap_minutes?: number;
+  pause_start?: string | null;
+  pause_end?: string | null;
+  taxi_name?: string;
+  taxi_phone?: string;
   updated_at: string;
 }
 
@@ -148,6 +152,11 @@ function settingsFromRow(s: SettingsRow): ShuttleSettings {
     minLeadMinutes: s.min_lead_minutes,
     receptionPhone: s.reception_phone,
     pickupGapMinutes: s.pickup_gap_minutes ?? DEFAULT_SETTINGS.pickupGapMinutes,
+    // Database non ancora aggiornato (colonne assenti): valori iniziali; colonna presente ma vuota: nessuna pausa.
+    pauseStart: s.pause_start === undefined ? DEFAULT_SETTINGS.pauseStart : s.pause_start ? hhmm(s.pause_start) : '',
+    pauseEnd: s.pause_end === undefined ? DEFAULT_SETTINGS.pauseEnd : s.pause_end ? hhmm(s.pause_end) : '',
+    taxiName: s.taxi_name ?? DEFAULT_SETTINGS.taxiName,
+    taxiPhone: s.taxi_phone ?? DEFAULT_SETTINGS.taxiPhone,
     updatedAt: s.updated_at,
   };
 }
@@ -290,6 +299,10 @@ export function createSupabaseBackend(url: string, anonKey: string): ShuttleBack
           minLeadMinutes: settings.minLeadMinutes,
           receptionPhone: settings.receptionPhone,
           pickupGapMinutes: settings.pickupGapMinutes,
+          pauseStart: settings.pauseStart,
+          pauseEnd: settings.pauseEnd,
+          taxiName: settings.taxiName,
+          taxiPhone: settings.taxiPhone,
         },
       });
       return settingsFromRow(row);
@@ -383,8 +396,16 @@ export function createSupabaseBackend(url: string, anonKey: string): ShuttleBack
       return { token: res.token, stayId: res.stay_id, room: res.room, persons: res.persons, validUntil: res.valid_until } satisfies GuestSession;
     },
     settings: async (token) => {
-      const s = await rpc<ShuttleSettings>(client, 'shuttle_guest_settings', { p_token: token });
-      return { ...s, pickupGapMinutes: s.pickupGapMinutes ?? DEFAULT_SETTINGS.pickupGapMinutes };
+      const s = await rpc<Partial<ShuttleSettings>>(client, 'shuttle_guest_settings', { p_token: token });
+      return {
+        ...DEFAULT_SETTINGS,
+        ...s,
+        pickupGapMinutes: s.pickupGapMinutes ?? DEFAULT_SETTINGS.pickupGapMinutes,
+        pauseStart: s.pauseStart ?? DEFAULT_SETTINGS.pauseStart,
+        pauseEnd: s.pauseEnd ?? DEFAULT_SETTINGS.pauseEnd,
+        taxiName: s.taxiName ?? DEFAULT_SETTINGS.taxiName,
+        taxiPhone: s.taxiPhone ?? DEFAULT_SETTINGS.taxiPhone,
+      } as ShuttleSettings;
     },
     rides: async (token) => (await rpc<RideRow[]>(client, 'shuttle_guest_rides', { p_token: token })).map(rideFromRow),
     async busy(token, date) {

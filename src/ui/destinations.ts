@@ -1,5 +1,5 @@
 import { HOTEL_PICKUP } from '../domain/rules';
-import type { ShuttleSettings } from '../domain/types';
+import type { Destination, ShuttleSettings } from '../domain/types';
 
 /**
  * Colore fisso per ogni punto di ritiro, come le etichette colorate del riferimento grafico: l'autista
@@ -23,4 +23,22 @@ export function destinationColor(id: string, settings?: Pick<ShuttleSettings, 'd
   const index = settings?.destinations.findIndex((d) => d.id === id) ?? -1;
   const n = index >= 0 ? index : [...id].reduce((sum, c) => sum + c.charCodeAt(0), 0);
   return EXTRA[n % EXTRA.length]!;
+}
+
+type MeetingFields = Pick<Destination, 'name' | 'place' | 'meetingPoint' | 'mapLink'>;
+
+/** Vero se la reception ha indicato il meeting point (testo o posizione). */
+export function hasMeetingPoint(d: MeetingFields | null | undefined): boolean {
+  return !!(d?.meetingPoint?.trim() || d?.mapLink?.trim());
+}
+
+/**
+ * Collegamento alla mappa del meeting point: il link di Google Maps così com'è, altrimenti una ricerca su
+ * Google Maps con le coordinate o l'indirizzo indicati (o, in mancanza, con nome e località dell'impianto).
+ */
+export function mapHref(d: MeetingFields): string {
+  const link = d.mapLink?.trim() ?? '';
+  if (/^https?:\/\//i.test(link)) return link;
+  const query = link || [d.meetingPoint?.trim() || d.name, d.place].filter(Boolean).join(', ');
+  return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(query)}`;
 }

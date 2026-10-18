@@ -160,6 +160,9 @@ await as('authenticated', DEV_R, `select * from public.shuttle_save_settings('{"
 ok((await guestRide('16:10', 'ritorno', 'alpe-di-siusi', 1)).rows[0].j.status === 'richiesta', 'tempo tra viaggi a 0: controllo spento');
 ok((await one('anon', null, `select public.shuttle_guest_settings($1::uuid) j`, [login.token])).j.pickupGapMinutes === 0, 'l’ospite riceve il tempo tra viaggi');
 await as('authenticated', DEV_R, `select * from public.shuttle_save_settings('{"pickupGapMinutes":20}'::jsonb)`);
+await expectError(guestRide('12:30', 'andata', 'seceda', 2), 'non_valida:fuori_orario_servizio', 'pausa 11:30–14:00: orario fuori servizio');
+const gs = (await one('anon', null, `select public.shuttle_guest_settings($1::uuid) j`, [login.token])).j;
+ok(gs.pauseStart === '11:30' && gs.pauseEnd === '14:00' && gs.taxiName === 'Taxi Fleur' && gs.taxiPhone === '+39 335 63 45 264', 'l’ospite riceve pausa e taxi per il fuori orario');
 
 // --- Cambio ospite nella stessa camera e partenza anticipata
 await as('authenticated', DEV_R, `select public.shuttle_sync_rooms($1::jsonb, true)`, [JSON.stringify([{ room: '105', reservationId: 'res-105-b', persons: 1, validUntil: tomorrow }])]);

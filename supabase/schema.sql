@@ -38,15 +38,24 @@ create table if not exists public.shuttle_settings (
 
 -- Aggiunte successive (lo script resta rieseguibile su un database già in uso).
 alter table public.shuttle_settings
-  add column if not exists pickup_gap_minutes int not null default 20 check (pickup_gap_minutes between 0 and 120);
+  add column if not exists pickup_gap_minutes int not null default 20 check (pickup_gap_minutes between 0 and 120),
+  -- Pausa di metà giornata (servizio 08:00–11:30 e 14:00–17:30): vuote = nessuna pausa.
+  add column if not exists pause_start time default '11:30',
+  add column if not exists pause_end   time default '14:00',
+  -- Taxi proposto all'ospite fuori orario.
+  add column if not exists taxi_name  text not null default 'Taxi Fleur',
+  add column if not exists taxi_phone text not null default '+39 335 63 45 264';
 
 insert into public.shuttle_settings (id, destinations)
 values (1, '[
-  {"id":"seceda","name":"Seceda","place":"Ortisei","active":true},
-  {"id":"alpe-di-siusi","name":"Alpe di Siusi","place":"Ortisei","active":true},
-  {"id":"palmer","name":"Palmer (Campetti scuola)","place":"Ortisei","active":true},
-  {"id":"col-raiser","name":"Col Raiser (Gardena Ronda/Saslong)","place":"S. Cristina","active":true},
-  {"id":"monte-pana","name":"Monte Pana","place":"S. Cristina","active":true}
+  {"id":"seceda","name":"Seceda","place":"Ortisei","active":true,
+   "meetingPoint":"Stazione a valle della funivia Ortisei–Seceda","mapLink":"Funivia Ortisei Seceda, Ortisei"},
+  {"id":"alpe-di-siusi","name":"Alpe di Siusi","place":"Ortisei","active":true,
+   "meetingPoint":"Stazione a valle della cabinovia Ortisei–Alpe di Siusi","mapLink":"Cabinovia Ortisei Alpe di Siusi, Ortisei"},
+  {"id":"palmer","name":"Palmer (Campetti scuola)","place":"Ortisei","active":true,"meetingPoint":"","mapLink":""},
+  {"id":"col-raiser","name":"Col Raiser (Gardena Ronda/Saslong)","place":"S. Cristina","active":true,
+   "meetingPoint":"Stazione a valle della cabinovia Col Raiser","mapLink":"Cabinovia Col Raiser, Santa Cristina Valgardena"},
+  {"id":"monte-pana","name":"Monte Pana","place":"S. Cristina","active":true,"meetingPoint":"","mapLink":""}
 ]'::jsonb)
 on conflict (id) do nothing;
 
@@ -262,7 +271,9 @@ begin
   if p_time is null then
     probs := array_append(probs, 'orario_non_valido');
   else
-    if p_time < s.service_start or p_time > s.service_end then
+    if p_time < s.service_start or p_time > s.service_end
+       or (s.pause_start is not null and s.pause_end is not null and s.pause_start < s.pause_end
+           and p_time > s.pause_start and p_time < s.pause_end) then
       probs := array_append(probs, 'fuori_orario_servizio');
     end if;
     if p_date = today then
@@ -404,6 +415,10 @@ begin
     min_lead_minutes = coalesce((p ->> 'minLeadMinutes')::int, min_lead_minutes),
     reception_phone  = coalesce(p ->> 'receptionPhone', reception_phone),
     pickup_gap_minutes = coalesce((p ->> 'pickupGapMinutes')::int, pickup_gap_minutes),
+    pause_start      = case when p ? 'pauseStart' then nullif(p ->> 'pauseStart', '')::time else pause_start end,
+    pause_end        = case when p ? 'pauseEnd' then nullif(p ->> 'pauseEnd', '')::time else pause_end end,
+    taxi_name        = coalesce(p ->> 'taxiName', taxi_name),
+    taxi_phone       = coalesce(p ->> 'taxiPhone', taxi_phone),
     updated_at       = now()
   where id = 1
   returning * into s;
@@ -852,7 +867,9 @@ begin
     'destinations', s.destinations, 'seats', s.seats, 'waitMinutes', s.wait_minutes,
     'serviceStart', to_char(s.service_start, 'HH24:MI'), 'serviceEnd', to_char(s.service_end, 'HH24:MI'),
     'minLeadMinutes', s.min_lead_minutes, 'receptionPhone', s.reception_phone,
-    'pickupGapMinutes', s.pickup_gap_minutes, 'updatedAt', s.updated_at);
+    'pickupGapMinutes', s.pickup_gap_minutes,
+    'pauseStart', coalesce(to_char(s.pause_start, 'HH24:MI'), ''), 'pauseEnd', coalesce(to_char(s.pause_end, 'HH24:MI'), ''),
+    'taxiName', s.taxi_name, 'taxiPhone', s.taxi_phone, 'updatedAt', s.updated_at);
 end
 $$;
 
