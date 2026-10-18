@@ -36,7 +36,7 @@ import { ShuttleError } from '../domain/types';
 import type { GuestApi, ShuttleBackend, StaffApi, StaffAuth, StaffDevices, StaffRole, StaffUser } from './ShuttleStore';
 
 interface DemoState {
-  version: 5;
+  version: 6;
   settings: ShuttleSettings;
   stays: ShuttleStay[];
   rides: Ride[];
@@ -48,7 +48,7 @@ interface DemoState {
   staffSessions: Record<string, { role: StaffRole; at: string }>;
 }
 
-const STORAGE_KEY = 'shuttle-hartmann-demo-v5';
+const STORAGE_KEY = 'shuttle-hartmann-demo-v6';
 const MAX_FAILED = 5;
 const LOCK_MS = 10 * 60000;
 
@@ -91,7 +91,7 @@ export function createDemoBackend(opts: DemoOptions = {}): DemoHub {
       const raw = localStorage.getItem(STORAGE_KEY);
       if (!raw) return null;
       const parsed = JSON.parse(raw) as DemoState;
-      if (parsed.version !== 5 || !parsed.rides.some((r) => r.serviceDate >= romeDate(clock.now()))) return null;
+      if (parsed.version !== 6 || !parsed.rides.some((r) => r.serviceDate >= romeDate(clock.now()))) return null;
       return parsed;
     } catch {
       return null;
@@ -475,7 +475,7 @@ function seed(nowMs: number, pins: Record<StaffRole, string>, signedIn: Record<s
   });
 
   return {
-    version: 5,
+    version: 6,
     settings: { ...DEFAULT_SETTINGS, rooms: [...DEFAULT_SETTINGS.rooms], updatedAt: iso(-24 * 60) },
     stays,
     rides,

@@ -29,7 +29,9 @@ Pagina: `https://alpstay.github.io/ShuttleHartmann/` (GitHub Pages, file unico `
    può cancellare finché l'autista non l'ha avvisato di essere arrivato: autista e reception ricevono subito
    un avviso con suono. Dopo l'arrivo dell'autista cancella solo la reception.
    Pagina a colonna unica: a tutta larghezza sul telefono, centrata su tablet e computer; in alto pulsanti
-   grandi con la loro parola (*Avvisi*, lingua, *Esci*) e sotto il numero di camera.
+   grandi con la loro parola (*Avvisi*, lingua, *Info*, *Esci*) e sotto il numero di camera. *Info* apre le
+   informazioni generali: in cima il pulsante **Telefona in hotel**, poi orari, come funziona, posti, meeting
+   point di ogni impianto con la mappa e il taxi fuori orario.
    **Il mezzo è uno solo**: se all'orario scelto la navetta è già impegnata (un altro impianto, o un altro
    orario a meno di 20 minuti) l'orario è bloccato e compaiono gli orari liberi più vicini, compreso il
    viaggio già previsto dallo stesso punto («con altri ospiti»). Il controllo si ripete sul server.
@@ -112,7 +114,8 @@ GitHub Pages  index.html ◀── reception (password presenze, rilettura ogni 
   aggiornamento della pagina (e comunque all'apertura di «Prenota una corsa») e all'autista entro un minuto.
 - **Servizio**: posti sul mezzo, attesa massima, anticipo minimo, **tempo tra due viaggi del mezzo**
   (20 minuti; 0 = nessun controllo), prima e ultima corsa.
-- **Ospiti**: telefono reception mostrato all'ospite e anteprima delle condizioni in IT/DE/EN.
+- **Ospiti**: telefono dell'hotel (+39 0471 774440) per il pulsante *Telefona in hotel* nelle informazioni,
+  taxi fuori orario (Taxi Fleur) e anteprima delle condizioni in IT/DE/EN.
 
 ## Aggiornare il database già in uso
 

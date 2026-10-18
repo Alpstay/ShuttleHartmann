@@ -103,6 +103,8 @@ export interface GuestStrings {
   infoSeats: (seats: number) => string;
   infoOutside: string;
   infoReception: string;
+  /** Pulsante della pagina Info che chiama la reception dell'hotel. */
+  callHotel: string;
   stepOf: (n: number, total: number) => string;
 }
 
@@ -224,6 +226,7 @@ const it: GuestStrings = {
   infoSeats: (n) => `La navetta ha ${n} posti: alla stessa ora e dallo stesso punto si viaggia insieme.`,
   infoOutside: 'Fuori orario',
   infoReception: 'Reception',
+  callHotel: 'Telefona in hotel',
   stepOf: (n, t) => `Passo ${n} di ${t}`,
 };
 
@@ -345,6 +348,7 @@ const de: GuestStrings = {
   infoSeats: (n) => `Der Shuttle hat ${n} Plätze: zur gleichen Zeit und vom gleichen Ort fährt man gemeinsam.`,
   infoOutside: 'Außerhalb der Fahrzeiten',
   infoReception: 'Rezeption',
+  callHotel: 'Hotel anrufen',
   stepOf: (n, t) => `Schritt ${n} von ${t}`,
 };
 
@@ -466,6 +470,7 @@ const en: GuestStrings = {
   infoSeats: (n) => `The shuttle has ${n} seats: same time and same place means you ride together.`,
   infoOutside: 'Outside shuttle hours',
   infoReception: 'Reception',
+  callHotel: 'Call the hotel',
   stepOf: (n, t) => `Step ${n} of ${t}`,
 };
 

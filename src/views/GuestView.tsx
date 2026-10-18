@@ -339,6 +339,17 @@ function GuestInfo({ t, settings, onClose }: { t: GuestStrings; settings: Shuttl
         <h2 className="text-[1.5rem] leading-tight">{t.infoTitle}</h2>
       </header>
       <main className="flex flex-col gap-5 px-4 pb-8 pt-2">
+        {recTel ? (
+          // In cima, grande: chi apre le informazioni spesso vuole solo parlare con la reception.
+          <a href={`tel:${recTel}`} className="flex min-h-16 items-center gap-3 rounded-2xl bg-gold px-4 py-2 text-on-gold shadow-sm active:scale-[0.99]">
+            <Phone size={24} className="shrink-0" aria-hidden />
+            <span className="flex flex-col leading-tight">
+              <span className="text-lg font-bold">{t.callHotel}</span>
+              <span className="tnum text-sm">{settings.receptionPhone}</span>
+            </span>
+          </a>
+        ) : null}
+
         <section className="flex flex-col gap-1.5">
           <h3 className="eyebrow">{t.infoHours}</h3>
           <p className="tnum whitespace-pre-line font-title text-3xl leading-tight">{serviceHoursLabel(settings).replace(' · ', '\n')}</p>
@@ -388,15 +399,6 @@ function GuestInfo({ t, settings, onClose }: { t: GuestStrings; settings: Shuttl
           </section>
         ) : null}
 
-        {settings.receptionPhone.trim() ? (
-          <section className="flex flex-col gap-2">
-            <h3 className="eyebrow">{t.infoReception}</h3>
-            <a href={`tel:${recTel}`} className="flex min-h-14 items-center gap-3 rounded-xl border border-line px-4 py-2">
-              <Phone size={20} className="shrink-0 text-gold" aria-hidden />
-              <span className="tnum text-lg font-bold">{settings.receptionPhone}</span>
-            </a>
-          </section>
-        ) : null}
       </main>
     </GuestShell>
   );

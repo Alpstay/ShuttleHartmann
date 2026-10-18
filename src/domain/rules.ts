@@ -32,7 +32,7 @@ export const DEFAULT_SETTINGS: ShuttleSettings = {
     { id: 'seceda', name: 'Seceda', place: 'Ortisei', active: true, meetingPoint: 'Stazione a valle della funivia Ortisei–Seceda', mapLink: 'Funivia Ortisei Seceda, Ortisei' },
     { id: 'alpe-di-siusi', name: 'Alpe di Siusi', place: 'Ortisei', active: true, meetingPoint: 'Stazione a valle della cabinovia Ortisei–Alpe di Siusi', mapLink: 'Cabinovia Ortisei Alpe di Siusi, Ortisei' },
     { id: 'palmer', name: 'Palmer (Campetti scuola)', place: 'Ortisei', active: true, meetingPoint: '', mapLink: '' },
-    { id: 'col-raiser', name: 'Col Raiser (Gardena Ronda/Saslong)', place: 'S. Cristina', active: true, meetingPoint: 'Stazione a valle della cabinovia Col Raiser', mapLink: 'Cabinovia Col Raiser, Santa Cristina Valgardena' },
+    { id: 'col-raiser', name: 'Col Raiser (Gardena Ronda/Saslong)', place: 'S. Cristina', active: true, meetingPoint: 'Stazione a valle della Gardena Ronda (Saslong)', mapLink: 'Gardena Ronda Express Saslong, Santa Cristina Valgardena' },
     { id: 'monte-pana', name: 'Monte Pana', place: 'S. Cristina', active: true, meetingPoint: '', mapLink: '' },
   ],
   seats: 8,
@@ -44,7 +44,7 @@ export const DEFAULT_SETTINGS: ShuttleSettings = {
   taxiName: 'Taxi Fleur',
   taxiPhone: '+39 335 63 45 264',
   minLeadMinutes: 15,
-  receptionPhone: '',
+  receptionPhone: '+39 0471 774440',
   pickupGapMinutes: 20,
   updatedAt: '1970-01-01T00:00:00.000Z',
 };

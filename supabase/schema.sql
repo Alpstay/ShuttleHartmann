@@ -29,7 +29,7 @@ create table if not exists public.shuttle_settings (
   service_start    time not null default '08:00',
   service_end      time not null default '17:30',
   min_lead_minutes int  not null default 15 check (min_lead_minutes between 0 and 240),
-  reception_phone  text not null default '',
+  reception_phone  text not null default '+39 0471 774440',
   updated_at       timestamptz not null default now(),
   check (service_start < service_end),
   check (jsonb_typeof(destinations) = 'array'),
@@ -54,7 +54,7 @@ values (1, '[
    "meetingPoint":"Stazione a valle della cabinovia Ortisei–Alpe di Siusi","mapLink":"Cabinovia Ortisei Alpe di Siusi, Ortisei"},
   {"id":"palmer","name":"Palmer (Campetti scuola)","place":"Ortisei","active":true,"meetingPoint":"","mapLink":""},
   {"id":"col-raiser","name":"Col Raiser (Gardena Ronda/Saslong)","place":"S. Cristina","active":true,
-   "meetingPoint":"Stazione a valle della cabinovia Col Raiser","mapLink":"Cabinovia Col Raiser, Santa Cristina Valgardena"},
+   "meetingPoint":"Stazione a valle della Gardena Ronda (Saslong)","mapLink":"Gardena Ronda Express Saslong, Santa Cristina Valgardena"},
   {"id":"monte-pana","name":"Monte Pana","place":"S. Cristina","active":true,"meetingPoint":"","mapLink":""}
 ]'::jsonb)
 on conflict (id) do nothing;
