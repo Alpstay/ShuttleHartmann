@@ -12,7 +12,7 @@ const clock = new OffsetClock();
 const hub = createDemoBackend({
   clock,
   persist: true,
-  pins: { reception: String(env.VITE_DEMO_PIN_RECEPTION ?? '0000'), autista: String(env.VITE_DEMO_PIN_AUTISTA ?? '1111') },
+  pins: { reception: String(env.VITE_DEMO_PIN_RECEPTION ?? '000000'), autista: String(env.VITE_DEMO_PIN_AUTISTA ?? '111111') },
   signedIn: { 'demo-reception': 'reception', 'demo-autista': 'autista' },
 });
 const presence = new DemoPresenceSource(() => clock.now());

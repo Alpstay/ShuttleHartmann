@@ -16,6 +16,8 @@ import {
   isStayValid,
   normalizeRoom,
   staffPinProblem,
+  MAX_GUEST_OPEN_RIDES_PER_DAY,
+  isOpen,
   validateRideInput,
 } from '../domain/rules';
 import { addDays, fromMinutes, romeDate, romeMinutesOfDay, systemClock, type Clock } from '../domain/time';
@@ -33,7 +35,7 @@ import type {
   Unsubscribe,
 } from '../domain/types';
 import { ShuttleError } from '../domain/types';
-import type { GuestApi, ShuttleBackend, StaffApi, StaffAuth, StaffDevices, StaffRole, StaffUser } from './ShuttleStore';
+import type { GuestApi, PinFailuresInfo, ShuttleBackend, StaffApi, StaffAuth, StaffDevices, StaffRole, StaffUser } from './ShuttleStore';
 
 interface DemoState {
   version: 6;
@@ -233,7 +235,7 @@ export function createDemoBackend(opts: DemoOptions = {}): DemoHub {
         need('reception');
         return (['reception', 'autista'] as StaffRole[]).map((r): StaffDevices => {
           const list = Object.values(state.staffSessions).filter((s) => s.role === r);
-          return { role: r, count: list.length, lastLoginAt: list.map((s) => s.at).sort().at(-1) ?? null };
+          return { role: r, count: list.length, lastLoginAt: list.map((s) => s.at).sort().at(-1) ?? null, pinDigits: state.pins[r] ? state.pins[r].length : null };
         });
       },
       disconnect: async (r) => {
@@ -242,6 +244,20 @@ export function createDemoBackend(opts: DemoOptions = {}): DemoHub {
         const removed = Object.keys(state.staffSessions).length - keep.length;
         commit({ ...state, staffSessions: Object.fromEntries(keep) });
         return removed;
+      },
+      pinFailures: async (): Promise<PinFailuresInfo> => {
+        need('reception');
+        const now = clock.now();
+        const all = [...pinFailures.values()].flat().filter((t) => now - t < 86400000);
+        const lastHour = all.filter((t) => now - t < 3600000).length;
+        const last = all.length ? Math.max(...all) : null;
+        return { lastHour, lastDay: all.length, lastAt: last ? new Date(last).toISOString() : null, blocked: lastHour >= 20 || all.length >= 50 };
+      },
+      clearPinFailures: async () => {
+        need('reception');
+        const n = [...pinFailures.values()].flat().length;
+        pinFailures.clear();
+        return n;
       },
       watchRides(date, onChange) {
         const emit = () => onChange(state.rides.filter((r) => r.serviceDate === date).sort(compareRides));
@@ -375,6 +391,9 @@ export function createDemoBackend(opts: DemoOptions = {}): DemoHub {
       // Il mezzo è uno solo: niente viaggi sovrapposti né oltre i posti (come shuttle_trip_problem sul server).
       const trip = checkTrip(input, busySlots(state.rides, input.serviceDate), state.settings);
       if (trip) throw new ShuttleError('non_valida', trip);
+      // Contro le prenotazioni a raffica (come shuttle_guest_create_ride).
+      const open = state.rides.filter((r) => r.stayId === stay.id && r.serviceDate === input.serviceDate && isOpen(r.status)).length;
+      if (open >= MAX_GUEST_OPEN_RIDES_PER_DAY) throw new ShuttleError('non_valida', 'troppe_corse');
       const ride = newRide(input, { room: stay.room, stayId: stay.id, reservationId: stay.reservationId, createdBy: 'ospite' });
       commit({ ...state, rides: [...state.rides, ride], events: [...state.events, event(ride.id, 'creata', 'ospite')] });
       return ride;

@@ -36,6 +36,17 @@ export interface StaffDevices {
   role: StaffRole;
   count: number;
   lastLoginAt: IsoTimestamp | null;
+  /** Cifre del PIN in uso (4 = PIN vecchio, da cambiare); null se il PIN non è impostato. */
+  pinDigits: number | null;
+}
+
+/** Tentativi di PIN errati: servono alla reception per accorgersi di chi prova a entrare. */
+export interface PinFailuresInfo {
+  lastHour: number;
+  lastDay: number;
+  lastAt: IsoTimestamp | null;
+  /** Nuovi accessi dello staff bloccati (20 errori in un'ora o 50 in 24 ore). */
+  blocked: boolean;
 }
 
 /** Operazioni dello staff. Ogni scrittura passa per funzioni lato server che applicano le regole. */
@@ -48,6 +59,10 @@ export interface StaffApi {
   devices(): Promise<StaffDevices[]>;
   /** Solo reception: scollega tutti i dispositivi del ruolo tranne quello in uso. Restituisce quanti. */
   disconnect(role: StaffRole): Promise<number>;
+  /** Solo reception: tentativi di PIN errati delle ultime 24 ore. */
+  pinFailures(): Promise<PinFailuresInfo>;
+  /** Solo reception: azzera i tentativi errati e sblocca i nuovi accessi. Restituisce quanti ne ha tolti. */
+  clearPinFailures(): Promise<number>;
 
   /** Corse di una data, aggiornate in tempo reale. Il callback riceve sempre l'elenco completo. */
   watchRides(date: IsoDate, onChange: (rides: Ride[]) => void, onError?: (e: Error) => void): Unsubscribe;

@@ -5,6 +5,7 @@ import { CHARGE_LABEL, DRIVER_MESSAGE_LABEL, EXTRA_ROOM, compareRides, isOpen, i
 import { addDays, formatLongDate, formatShortDate, romeDate, romeMinutesOfDay, romeTimeOf, toMinutes } from '../domain/time';
 import type { Direction, IsoDate, PresenceSnapshot, Ride, RideEvent, ShuttleSettings, ShuttleStay } from '../domain/types';
 import { PresenceError, roomPresences, roomsToSync, type RoomPresence } from '../presence/presence';
+import type { PinFailuresInfo } from '../store/ShuttleStore';
 import { Button, Countdown, FieldLabel, InlineConfirm, Stepper, chime, cx, unlockSound, useApp, useNow, useToast } from '../ui/kit';
 import { AlpstayLogo } from '../ui/Logo';
 import { RoomCard } from '../ui/PinCard';
@@ -33,6 +34,14 @@ export function ReceptionView({ onSignOut }: { onSignOut?: () => void }) {
   const [creating, setCreating] = useState<{ room: string } | null>(null);
   const [toast, showToast] = useToast();
   const [alerts, setAlerts] = useState<{ id: string; text: string }[]>([]);
+  // PIN errati dello staff: avviso in lista se qualcuno prova a indovinarli (dettagli in Impostazioni → Accessi).
+  const [pinInfo, setPinInfo] = useState<PinFailuresInfo | null>(null);
+  useEffect(() => {
+    const load = () => staff.pinFailures().then(setPinInfo, () => setPinInfo(null));
+    void load();
+    const id = window.setInterval(() => void load(), 5 * 60000);
+    return () => window.clearInterval(id);
+  }, [staff, showSettings]);
 
   useEffect(() => staff.watchRides(date, setRides, (e) => showToast(e.message, 'bad')), [staff, date, showToast]);
   // Il mezzo è uno solo: corse del giorno in viaggi sovrapposti (stessa fascia, posti diversi) o oltre i posti.
@@ -214,6 +223,19 @@ export function ReceptionView({ onSignOut }: { onSignOut?: () => void }) {
                   </Button>
                 </div>
               ))}
+            </div>
+          ) : null}
+
+          {pinInfo && (pinInfo.blocked || pinInfo.lastDay >= 10) ? (
+            <div role="alert" className={cx('flex flex-wrap items-center gap-3 rounded-xl border p-3', pinInfo.blocked ? 'border-bad/40 bg-bad-soft' : 'border-warn/40 bg-warn-soft')}>
+              <KeyRound size={18} className={cx('shrink-0', pinInfo.blocked ? 'text-bad' : 'text-warn')} aria-hidden />
+              <p className="mr-auto text-sm">
+                <strong>{pinInfo.blocked ? 'Accessi staff sospesi:' : 'Molti PIN errati:'}</strong> {pinInfo.lastDay} tentativi sbagliati nelle ultime 24 ore.
+                {pinInfo.blocked ? ' Nessun nuovo dispositivo può entrare finché non sblocchi.' : ' Qualcuno potrebbe provare a indovinare i PIN.'}
+              </p>
+              <Button size="sm" onClick={() => setShowSettings(true)}>
+                Impostazioni
+              </Button>
             </div>
           ) : null}
 

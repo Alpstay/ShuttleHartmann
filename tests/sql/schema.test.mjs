@@ -49,8 +49,8 @@ await db.exec(`grant select on all tables in schema public to anon, authenticate
 await db.exec(readFileSync(schemaPath, 'utf8')); // rieseguibile
 ok(true, 'schema eseguito due volte senza errori');
 
-const PIN_R = '4711';
-const PIN_D = '9090';
+const PIN_R = '471193';
+const PIN_D = '909012';
 const DEV_R = '11111111-0000-4000-8000-000000000001';
 const DEV_D = '11111111-0000-4000-8000-000000000002';
 const STRANGER = '11111111-0000-4000-8000-000000000003';
@@ -74,6 +74,11 @@ await db.query(`select public.shuttle_admin_set_pin('autista', $1)`, [PIN_D]);
 const stored = (await db.query(`select pin_hash from public.shuttle_access`)).rows.map((r) => r.pin_hash);
 ok(stored.every((h) => h.length === 64 && h !== PIN_R && h !== PIN_D), 'PIN salvati solo come hash');
 await expectError(db.query(`select public.shuttle_admin_set_pin('autista', $1)`, [PIN_R]), 'non_valida:Reception e autista devono avere PIN diversi', 'PIN uguali per i due ruoli rifiutati');
+await expectError(db.query(`select public.shuttle_admin_set_pin('autista', '4711')`), 'non_valida:Il PIN deve avere da 6 a 8 cifre', 'PIN nuovi di 4 cifre rifiutati');
+await expectError(db.query(`select public.shuttle_admin_set_pin('autista', '123456789')`), 'non_valida:Il PIN deve avere da 6 a 8 cifre', 'PIN oltre 8 cifre rifiutati');
+for (const weak of ['123456', '777777', '654321', '890123']) {
+  await expectError(db.query(`select public.shuttle_admin_set_pin('autista', $1)`, [weak]), 'non_valida:PIN troppo facile', `PIN banale ${weak} rifiutato`);
+}
 
 // --- Accesso staff con PIN
 ok((await one('authenticated', DEV_R, `select public.shuttle_staff_login('0000') j`)).j.error === 'pin_errato', 'PIN errato rifiutato');
@@ -188,15 +193,50 @@ await expectError(as('authenticated', DEV_R, `select * from public.shuttle_save_
 await one('authenticated', DEV_R2, `select public.shuttle_staff_login($1) j`, [PIN_R]);
 const devs = (await one('authenticated', DEV_R, `select public.shuttle_staff_devices() j`)).j;
 ok(devs.find((d) => d.role === 'reception').count === 2 && devs.find((d) => d.role === 'autista').count === 1, 'reception vede i dispositivi collegati per ruolo');
-await expectError(as('authenticated', DEV_D, `select public.shuttle_set_pin('autista', '1357')`), 'non_autorizzato', 'l’autista non cambia i PIN');
+await expectError(as('authenticated', DEV_D, `select public.shuttle_set_pin('autista', '135792')`), 'non_autorizzato', 'l’autista non cambia i PIN');
 await expectError(as('authenticated', DEV_R, `select public.shuttle_set_pin('autista', $1)`, [PIN_R]), 'non_valida:Reception e autista devono avere PIN diversi', 'PIN autista uguale alla reception rifiutato');
-await as('authenticated', DEV_R, `select public.shuttle_set_pin('autista', '1357')`);
+await as('authenticated', DEV_R, `select public.shuttle_set_pin('autista', '135792')`);
 ok((await one('authenticated', DEV_D, `select count(*)::int c from public.shuttle_rides`)).c === 0, 'cambio PIN autista: il dispositivo dell’autista viene scollegato');
-ok((await one('authenticated', DEV_D, `select public.shuttle_staff_login('1357') j`)).j.role === 'autista', 'l’autista rientra con il nuovo PIN');
+ok((await one('authenticated', DEV_D, `select public.shuttle_staff_login('135792') j`)).j.role === 'autista', 'l’autista rientra con il nuovo PIN');
 ok((await one('authenticated', DEV_R, `select public.shuttle_disconnect('reception') n`)).n === 1, 'reception scollega gli altri dispositivi reception (non sé stessa)');
 ok((await one('authenticated', DEV_R, `select count(*)::int c from public.shuttle_staff`)).c === 1, 'la reception che scollega resta collegata');
 await as('authenticated', DEV_D, `select public.shuttle_staff_logout()`);
 ok((await one('authenticated', DEV_D, `select count(*)::int c from public.shuttle_rides`)).c === 0, 'blocca: il dispositivo esce');
+
+// --- PIN vecchi di 4 cifre: funzionano ancora, la reception vede l'avviso «PIN corto»
+await db.exec(`update public.shuttle_access set pin_salt = 'vecchio', pin_hash = public.shuttle_pin_hash('vecchio', '2468'), pin_digits = null where role = 'autista'`);
+ok((await one('authenticated', DEV_D, `select public.shuttle_staff_login('2468') j`)).j.role === 'autista', 'PIN di 4 cifre già impostato: si entra ancora');
+const devs4 = (await one('authenticated', DEV_R, `select public.shuttle_staff_devices() j`)).j;
+ok(devs4.find((d) => d.role === 'autista').pinDigits === 4 && devs4.find((d) => d.role === 'reception').pinDigits === 6, `cifre dei PIN per l’avviso: ${JSON.stringify(devs4.map((d) => d.pinDigits))}`);
+
+// --- Tentativi a ripetizione da più dispositivi: blocco globale e sblocco della reception
+await db.query(`delete from public.shuttle_pin_failures`);
+const attackers = Array.from({ length: 5 }, (_, i) => `22222222-0000-4000-8000-00000000000${i}`);
+await db.exec(`insert into auth.users (id) values ${attackers.map((a) => `('${a}')`).join(',')};`);
+for (const a of attackers) for (let i = 0; i < 4; i++) await as('authenticated', a, `select public.shuttle_staff_login('000000')`);
+const blocked = (await one('authenticated', DEV_R2, `select public.shuttle_staff_login($1) j`, [PIN_R])).j;
+ok(blocked.error === 'accesso_bloccato', `20 PIN errati in un’ora da dispositivi diversi: nuovi accessi sospesi anche con il PIN giusto (${JSON.stringify(blocked)})`);
+ok((await one('authenticated', DEV_R, `select count(*)::int c from public.shuttle_rides`)).c > 0, 'i dispositivi già collegati restano dentro');
+const info = (await one('authenticated', DEV_R, `select public.shuttle_pin_failures_info() j`)).j;
+ok(info.blocked === true && info.lastHour === 20 && info.lastDay === 20, `la reception vede i tentativi errati: ${JSON.stringify(info)}`);
+await expectError(as('authenticated', DEV_D, `select public.shuttle_clear_pin_failures()`), 'non_autorizzato', 'l’autista non sblocca gli accessi');
+ok((await one('authenticated', DEV_R, `select public.shuttle_clear_pin_failures() n`)).n === 20, 'la reception azzera i tentativi');
+ok((await one('authenticated', DEV_R2, `select public.shuttle_staff_login($1) j`, [PIN_R])).j.role === 'reception', 'dopo lo sblocco si entra di nuovo');
+await expectError(as('anon', null, `select public.shuttle_pin_failures_info()`), 'permission denied', 'tentativi errati non visibili agli anonimi');
+
+// --- Area ospite: limiti contro le prenotazioni a raffica
+await db.query(`update public.shuttle_settings set pickup_gap_minutes = 0`);
+const g122 = (await one('anon', null, `select public.shuttle_guest_login('122') j`)).j;
+const g122Ride = (time) => as('anon', null, `select public.shuttle_guest_create_ride($1::uuid, $2::date, $3::time, 'andata', 'seceda', 1, null, true) j`, [g122.token, tomorrow, time]);
+for (const time of ['08:00', '08:30', '09:00', '09:30']) await g122Ride(time);
+await expectError(g122Ride('10:00'), 'non_valida:troppe_corse', 'quinta corsa aperta della stessa camera nello stesso giorno: rifiutata');
+const r122 = (await as('anon', null, `select public.shuttle_guest_rides($1::uuid) j`, [g122.token])).rows[0].j;
+await as('anon', null, `select public.shuttle_guest_cancel_ride($1::uuid, $2::uuid)`, [g122.token, r122[0].id]);
+ok((await g122Ride('10:00')).rows[0].j.status === 'richiesta', 'cancellata una corsa, se ne può prenotare un’altra');
+ok((await one('authenticated', DEV_R, `select * from public.shuttle_reception_create_ride('122', null, null, $1::date, '10:30', 'andata', 'seceda', 1, null)`, [tomorrow])).status === 'richiesta', 'la reception può aggiungere corse oltre il limite');
+await db.query(`update public.shuttle_settings set pickup_gap_minutes = 20`);
+for (let i = 0; i < 8; i++) await one('anon', null, `select public.shuttle_guest_login('122') j`);
+ok((await one('anon', null, `select public.shuttle_guest_login('122') j`)).j.error === 'troppi_tentativi', 'oltre 10 accessi in 10 minuti per la stessa camera: si chiede di riprovare');
 
 // --- Pubblicazione realtime e funzioni esposte
 const pub = (await db.query(`select tablename from pg_publication_tables where pubname='supabase_realtime' order by 1`)).rows.map((x) => x.tablename).join(',');

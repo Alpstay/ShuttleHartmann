@@ -1,10 +1,10 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { BedDouble, Clock, Eye, EyeOff, KeyRound, MapPin, MessageSquareText, Mountain, Plus, Save, Smartphone, Unplug, Users, X } from 'lucide-react';
 import { GUEST_STRINGS } from '../domain/i18n';
-import { normalizeRoom, staffPinProblem } from '../domain/rules';
+import { STAFF_PIN_MAX, STAFF_PIN_MIN, normalizeRoom, staffPinProblem } from '../domain/rules';
 import { romeTimeOf, formatShortDate } from '../domain/time';
 import type { GuestAccessMode, ShuttleSettings } from '../domain/types';
-import type { StaffDevices, StaffRole } from '../store/ShuttleStore';
+import type { PinFailuresInfo, StaffDevices, StaffRole } from '../store/ShuttleStore';
 import { mapHref } from '../ui/destinations';
 import { Button, FieldLabel, InlineConfirm, Stepper, cx, useApp } from '../ui/kit';
 
@@ -112,8 +112,10 @@ type SetFn = <K extends keyof ShuttleSettings>(k: K, v: ShuttleSettings[K]) => v
 function AccessSection({ draft, set, notify }: { draft: ShuttleSettings; set: SetFn; notify: (t: string, tone?: 'ok' | 'bad' | 'info') => void }) {
   const { backend } = useApp();
   const [devices, setDevices] = useState<StaffDevices[] | null>(null);
+  const [failures, setFailures] = useState<PinFailuresInfo | null>(null);
   const load = useCallback(() => {
     backend.staff.devices().then(setDevices, () => setDevices(null));
+    backend.staff.pinFailures().then(setFailures, () => setFailures(null));
   }, [backend]);
   useEffect(load, [load]);
 
@@ -121,17 +123,59 @@ function AccessSection({ draft, set, notify }: { draft: ShuttleSettings; set: Se
     <>
       <section className="flex flex-col gap-3" aria-labelledby="h-pin">
         <h3 id="h-pin" className="text-lg">PIN dello staff</h3>
-        <p className="text-sm text-muted">Il PIN decide l’area: con quello della reception si apre la reception, con quello dell’autista l’area autista. Cambiare un PIN scollega gli altri dispositivi di quel ruolo.</p>
+        <p className="text-sm text-muted">
+          Il PIN decide l’area: con quello della reception si apre la reception, con quello dell’autista l’area autista. I PIN nuovi hanno da {STAFF_PIN_MIN} a {STAFF_PIN_MAX} cifre, non in fila e non tutte uguali. Cambiare un PIN scollega gli altri dispositivi di quel ruolo.
+        </p>
         {(['reception', 'autista'] as StaffRole[]).map((role) => (
           <PinRow
             key={role}
             role={role}
+            digits={devices?.find((d) => d.role === role)?.pinDigits ?? null}
             onChanged={() => {
               notify(`PIN ${ROLE_LABEL[role].toLowerCase()} cambiato.`);
               load();
             }}
           />
         ))}
+      </section>
+
+      <section className="flex flex-col gap-3" aria-labelledby="h-fail">
+        <h3 id="h-fail" className="text-lg">PIN errati</h3>
+        {failures ? (
+          <div className={cx('flex flex-wrap items-center gap-3 rounded-xl border p-3', failures.blocked ? 'border-bad/40 bg-bad-soft' : failures.lastDay >= 10 ? 'border-warn/40 bg-warn-soft' : 'border-line')}>
+            <span className="flex min-w-0 flex-1 flex-col">
+              <span className="tnum font-bold">
+                {failures.lastDay} nelle ultime 24 ore · {failures.lastHour} nell’ultima ora
+              </span>
+              <span className="text-sm text-muted">
+                {failures.blocked
+                  ? 'Nuovi accessi dello staff sospesi per sicurezza (i dispositivi già collegati restano dentro). Se non sai chi è stato, cambia i PIN prima di sbloccare.'
+                  : failures.lastDay >= 10
+                    ? 'Molti tentativi: qualcuno potrebbe provare a indovinare i PIN. Valuta di cambiarli.'
+                    : 'Oltre 20 errori in un’ora o 50 in un giorno i nuovi accessi si sospendono da soli.'}
+              </span>
+            </span>
+            {failures.lastDay > 0 ? (
+              <Button
+                size="sm"
+                tone={failures.blocked ? 'gold' : 'soft'}
+                onClick={async () => {
+                  try {
+                    const n = await backend.staff.clearPinFailures();
+                    notify(`${n} ${n === 1 ? 'tentativo azzerato' : 'tentativi azzerati'}: accessi sbloccati.`, 'info');
+                    load();
+                  } catch (e) {
+                    notify((e as Error).message, 'bad');
+                  }
+                }}
+              >
+                {failures.blocked ? 'Sblocca gli accessi' : 'Azzera'}
+              </Button>
+            ) : null}
+          </div>
+        ) : (
+          <p className="text-sm text-muted">Dato non disponibile.</p>
+        )}
       </section>
 
       <section className="flex flex-col gap-3" aria-labelledby="h-dev">
@@ -181,7 +225,7 @@ function AccessSection({ draft, set, notify }: { draft: ShuttleSettings; set: Se
   );
 }
 
-function PinRow({ role, onChanged }: { role: StaffRole; onChanged: () => void }) {
+function PinRow({ role, digits, onChanged }: { role: StaffRole; digits: number | null; onChanged: () => void }) {
   const { backend } = useApp();
   const [open, setOpen] = useState(false);
   const [pin, setPin] = useState('');
@@ -219,6 +263,9 @@ function PinRow({ role, onChanged }: { role: StaffRole; onChanged: () => void })
         <span className="tnum text-muted" aria-label="PIN impostato">
           ••••
         </span>
+        {digits !== null && digits < STAFF_PIN_MIN ? (
+          <span className="rounded-full bg-warn-soft px-2.5 py-1 text-xs font-bold text-warn">PIN corto: cambialo con uno di {STAFF_PIN_MIN}–{STAFF_PIN_MAX} cifre</span>
+        ) : null}
         <Button size="sm" className="ml-auto" onClick={() => (setOpen(!open), setError(null))}>
           {open ? 'Chiudi' : 'Cambia PIN'}
         </Button>
@@ -227,16 +274,16 @@ function PinRow({ role, onChanged }: { role: StaffRole; onChanged: () => void })
         <form onSubmit={submit} className="slide-in mt-3 flex flex-wrap items-end gap-3">
           <div>
             <FieldLabel htmlFor={`${id}-new`}>Nuovo PIN</FieldLabel>
-            <input id={`${id}-new`} type={show ? 'text' : 'password'} inputMode="numeric" autoComplete="new-password" maxLength={4} value={pin} onChange={(e) => setPin(e.target.value.replace(/\D/g, ''))} className="tnum min-h-11 w-28 rounded-lg border border-line bg-bg px-3 text-lg tracking-[0.3em]" />
+            <input id={`${id}-new`} type={show ? 'text' : 'password'} inputMode="numeric" autoComplete="new-password" maxLength={STAFF_PIN_MAX} value={pin} onChange={(e) => setPin(e.target.value.replace(/\D/g, ''))} className="tnum min-h-11 w-36 rounded-lg border border-line bg-bg px-3 text-lg tracking-[0.3em]" />
           </div>
           <div>
             <FieldLabel htmlFor={`${id}-again`}>Ripeti</FieldLabel>
-            <input id={`${id}-again`} type={show ? 'text' : 'password'} inputMode="numeric" autoComplete="new-password" maxLength={4} value={again} onChange={(e) => setAgain(e.target.value.replace(/\D/g, ''))} className="tnum min-h-11 w-28 rounded-lg border border-line bg-bg px-3 text-lg tracking-[0.3em]" />
+            <input id={`${id}-again`} type={show ? 'text' : 'password'} inputMode="numeric" autoComplete="new-password" maxLength={STAFF_PIN_MAX} value={again} onChange={(e) => setAgain(e.target.value.replace(/\D/g, ''))} className="tnum min-h-11 w-36 rounded-lg border border-line bg-bg px-3 text-lg tracking-[0.3em]" />
           </div>
           <Button size="md" tone="ghost" aria-label={show ? 'Nascondi PIN' : 'Mostra PIN'} onClick={() => setShow(!show)}>
             {show ? <EyeOff size={18} /> : <Eye size={18} />}
           </Button>
-          <Button type="submit" tone="gold" disabled={busy || pin.length !== 4 || again.length !== 4}>
+          <Button type="submit" tone="gold" disabled={busy || pin.length < STAFF_PIN_MIN || again.length < STAFF_PIN_MIN}>
             Salva PIN
           </Button>
           {error ? <p className="w-full text-sm font-bold text-bad">{error}</p> : null}

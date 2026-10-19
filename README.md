@@ -81,15 +81,33 @@ GitHub Pages  index.html ◀── reception (password presenze, rilettura ogni 
   ID incoerenti. Nomi, camere e ID sono cifrati (AES-GCM, chiave da password con PBKDF2).
 - **Corse e accessi**: Supabase (PostgreSQL). Le tabelle sono in sola lettura per lo staff; ogni scrittura
   passa da funzioni che applicano le regole sul server (orario del server per i 5 minuti, stati, ruoli).
-  Lo staff entra con il PIN su una sessione anonima di Supabase Auth: i PIN sono salvati solo come hash,
-  blocco dopo 5 PIN errati per dispositivo (30 in tutto) in 10 minuti. L'ospite non vede le tabelle: usa
-  solo le funzioni `shuttle_guest_*` con il token di sessione, legato al soggiorno della camera.
+  Lo staff entra con il PIN su una sessione anonima di Supabase Auth: i PIN sono salvati solo come hash.
+  L'ospite non vede le tabelle: usa solo le funzioni `shuttle_guest_*` con il token di sessione, legato al
+  soggiorno della camera.
+
+## Sicurezza
+
+- **PIN dello staff**: i PIN nuovi hanno da 6 a 8 cifre, non in fila e non tutte uguali (controllo anche sul
+  server). I PIN di 4 cifre già impostati funzionano finché non si cambiano; in *Impostazioni → Accessi*
+  compare «PIN corto». Il PIN si conferma con *Entra* (nessun invio automatico, non si svela la lunghezza).
+- **Tentativi**: 5 PIN errati in 10 minuti bloccano quel dispositivo; 20 errori in un'ora o 50 in 24 ore, da
+  qualunque dispositivo, sospendono tutti i nuovi accessi dello staff (chi è già collegato resta dentro).
+  La reception vede i tentativi in *Impostazioni → Accessi → PIN errati* e in lista, se sono molti, e può
+  sbloccare con *Sblocca gli accessi*. Con un PIN di 6 cifre indovinarlo richiederebbe decine di anni.
+- **Area ospite** (si entra con il numero di camera, per scelta): al massimo 4 corse aperte per camera nello
+  stesso giorno (oltre, solo la reception), 10 accessi in 10 minuti e 20 telefoni collegati per soggiorno.
+- **Pagina**: Content-Security-Policy nella pagina di produzione (parla solo con sé stessa e con il progetto
+  Supabase, niente script esterni), non si apre dentro pagine altrui (iframe), `noindex` per i motori di
+  ricerca. Il prototipo usa PIN di prova propri, mai quelli veri.
+- **Da fare su Supabase e GitHub** (non dipende dal codice): verifica in due passaggi (MFA) sugli account,
+  password del progetto non condivisa in chiaro, provider *Email* disattivato.
 - **ID di Slope**: `reservation_id` e `room_name` si copiano invariati ovunque.
 
 ## Messa in produzione
 
 1. **Supabase** (progetto nuovo, regione UE): SQL Editor → incolla ed esegui `supabase/schema.sql`.
-   Poi, sempre nell'SQL Editor, imposta i PIN iniziali (scrivili solo lì, mai in un file del repository):
+   Poi, sempre nell'SQL Editor, imposta i PIN iniziali di 6–8 cifre (scrivili solo lì, mai in un file del
+   repository):
    `select public.shuttle_admin_set_pin('reception', '<PIN reception>');` e
    `select public.shuttle_admin_set_pin('autista', '<PIN autista>');`.
    In *Authentication → Sign In / Providers* attiva **Allow new users to sign up** e **Allow anonymous sign-ins**
@@ -106,8 +124,9 @@ GitHub Pages  index.html ◀── reception (password presenze, rilettura ogni 
 
 ## Programma Impostazioni (reception)
 
-- **Accessi**: cambio PIN reception e autista (devono essere diversi; cambiarne uno scollega gli altri
-  dispositivi di quel ruolo), dispositivi collegati per ruolo con «Scollega», ingresso ospiti
+- **Accessi**: cambio PIN reception e autista (6–8 cifre, diversi tra loro; cambiarne uno scollega gli altri
+  dispositivi di quel ruolo), PIN errati delle ultime 24 ore con *Azzera* / *Sblocca gli accessi*,
+  dispositivi collegati per ruolo con «Scollega», ingresso ospiti
   («solo camere con ospiti in casa» oppure «tutte le camere dell'elenco» se le presenze non arrivano).
 - **Camere**: elenco delle camere (numero come in Slope), aggiungi o togli.
 - **Impianti**: nome, località, attivo o no. Le modifiche arrivano agli ospiti al successivo
@@ -143,8 +162,9 @@ colore del testo per la modalità scura) nelle varianti `completo`, `nome` e `si
 ## Limiti da conoscere
 
 - L'ospite si riconosce con il solo numero di camera: chi conosce un numero di camera in casa può prenotare
-  a suo nome. Le camere sono attive solo con ospiti in casa e ogni corsa ha lo storico, ma prima di
-  addebitare un non presentato conviene sentire l'ospite.
+  a suo nome (scelta del 19/10/2026: nessun cognome o codice in più per l'ospite). Le camere sono attive solo
+  con ospiti in casa, ogni camera ha al massimo 4 corse aperte al giorno e ogni corsa ha lo storico, ma prima
+  di addebitare un non presentato conviene sentire l'ospite.
 - L'avviso all'autista e il messaggio all'ospite arrivano con la pagina aperta (anche in secondo piano).
   Con il telefono bloccato da tempo l'ospite vede l'aggiornamento appena riapre la pagina.
   Per una notifica anche a pagina chiusa il passo successivo è l'invio via WhatsApp con il risponditore

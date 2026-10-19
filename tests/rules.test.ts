@@ -131,10 +131,15 @@ describe('orari proposti', () => {
 
 describe('accessi', () => {
   it('PIN dello staff: 4 cifre e diversi tra reception e autista', () => {
-    expect(staffPinProblem('123', null)).toMatch(/4 cifre/);
-    expect(staffPinProblem('12a4', null)).toMatch(/4 cifre/);
-    expect(staffPinProblem('4711', '4711')).toMatch(/diversi/);
-    expect(staffPinProblem('4711', '9090')).toBeNull();
+    expect(staffPinProblem('4711', null)).toMatch(/da 6 a 8 cifre/);
+    expect(staffPinProblem('12a456', null)).toMatch(/da 6 a 8 cifre/);
+    expect(staffPinProblem('471193471', null)).toMatch(/da 6 a 8 cifre/);
+    expect(staffPinProblem('123456', null)).toMatch(/troppo facile/);
+    expect(staffPinProblem('000000', null)).toMatch(/troppo facile/);
+    expect(staffPinProblem('98765432', null)).toMatch(/troppo facile/);
+    expect(staffPinProblem('471193', '471193')).toMatch(/diversi/);
+    expect(staffPinProblem('471193', '909012')).toBeNull();
+    expect(staffPinProblem('30081975', null)).toBeNull();
   });
 
   it('numero di camera ripulito dagli spazi', () => {

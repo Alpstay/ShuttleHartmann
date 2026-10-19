@@ -3,8 +3,9 @@ import { Delete } from 'lucide-react';
 import { Button, cx } from './kit';
 
 /**
- * Tastierino numerico unico per tutti gli accessi: PIN dello staff (nascosto, invio automatico alla
- * quarta cifra) e numero di camera dell'ospite (visibile, invio con il pulsante).
+ * Tastierino numerico unico per tutti gli accessi: PIN dello staff (nascosto, da 4 a 8 cifre, invio con
+ * il pulsante) e numero di camera dell'ospite (visibile, invio con il pulsante).
+ * Con `length` l'invio è automatico quando il valore è completo.
  * Funziona anche con la tastiera del computer.
  */
 export function PinPad({
@@ -87,8 +88,9 @@ export function PinPad({
         />
         {masked ? (
           <div className="pointer-events-none absolute inset-0 flex items-center justify-center gap-3" aria-hidden>
-            {Array.from({ length: max }, (_, i) => (
-              <span key={i} className={cx('size-3.5 rounded-full', i < value.length ? 'bg-fg' : 'border-2 border-line')} />
+            {/* Lunghezza libera: un pallino per cifra scritta, così non si svela quante cifre ha il PIN. */}
+            {Array.from({ length: length ?? Math.max(value.length, 6) }, (_, i) => (
+              <span key={i} className={cx('size-3.5 rounded-full', i < value.length ? 'bg-fg' : length ? 'border-2 border-line' : 'border-2 border-line/50')} />
             ))}
           </div>
         ) : null}

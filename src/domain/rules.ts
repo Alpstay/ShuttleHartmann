@@ -75,7 +75,12 @@ export type RideInputProblem =
   | 'condizioni_non_accettate'
   // Dal controllo dei viaggi (checkTrip): il mezzo è uno solo.
   | 'orario_occupato'
-  | 'posti_esauriti';
+  | 'posti_esauriti'
+  // Dal server: troppe corse aperte della stessa camera nello stesso giorno.
+  | 'troppe_corse';
+
+/** Corse aperte che un ospite può avere per lo stesso giorno (andata e ritorno due volte). Rispecchiato in schema.sql. */
+export const MAX_GUEST_OPEN_RIDES_PER_DAY = 4;
 
 export interface ValidationContext {
   settings: ShuttleSettings;
@@ -386,8 +391,18 @@ export function normalizeRoom(input: string): string {
 }
 
 /** PIN dello staff: 4 cifre. Reception e autista devono avere PIN diversi (il PIN decide il ruolo). */
+/** Cifre dei PIN nuovi dello staff (i PIN di 4 cifre già impostati funzionano finché non si cambiano). */
+export const STAFF_PIN_MIN = 6;
+export const STAFF_PIN_MAX = 8;
+
+/** Vero per PIN banali: cifre tutte uguali o in fila, anche a scendere (123456, 987654, 890123). */
+export function isTrivialPin(pin: string): boolean {
+  return /^(\d)\1+$/.test(pin) || '01234567890123'.includes(pin) || '98765432109876'.includes(pin);
+}
+
 export function staffPinProblem(pin: string, otherRolePin: string | null): string | null {
-  if (!/^\d{4}$/.test(pin)) return 'Il PIN deve avere 4 cifre.';
+  if (!new RegExp(`^\\d{${STAFF_PIN_MIN},${STAFF_PIN_MAX}}$`).test(pin)) return `Il PIN deve avere da ${STAFF_PIN_MIN} a ${STAFF_PIN_MAX} cifre.`;
+  if (isTrivialPin(pin)) return 'PIN troppo facile: evita cifre tutte uguali o in fila.';
   if (otherRolePin !== null && pin === otherRolePin) return 'Reception e autista devono avere PIN diversi.';
   return null;
 }
@@ -566,6 +581,7 @@ export const PROBLEM_LABEL_IT: Record<RideInputProblem, string> = {
   condizioni_non_accettate: 'Accetta le condizioni di attesa.',
   orario_occupato: 'A quell’ora il mezzo è già impegnato in un altro viaggio.',
   posti_esauriti: 'Il viaggio a quell’ora è già pieno.',
+  troppe_corse: `Questa camera ha già ${MAX_GUEST_OPEN_RIDES_PER_DAY} corse aperte in quel giorno.`,
 };
 
 /** Riga CSV della giornata per la reception (separatore «;» per Excel in italiano). */

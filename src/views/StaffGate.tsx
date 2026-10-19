@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { Lock } from 'lucide-react';
+import { STAFF_PIN_MAX } from '../domain/rules';
 import type { ShuttleError } from '../domain/types';
 import type { StaffRole, StaffUser } from '../store/ShuttleStore';
 import { useApp } from '../ui/kit';
@@ -83,7 +84,7 @@ export function StaffGate({ area, title }: { area?: StaffRole; title?: string })
         id="staff-pin"
         label="Inserisci il PIN"
         hint={area ? STAFF_AREA[area].hint : 'Reception o autista'}
-        length={4}
+        maxLength={STAFF_PIN_MAX}
         masked
         submitLabel="Entra"
         busy={busy}

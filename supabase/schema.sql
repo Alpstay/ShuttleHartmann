@@ -66,6 +66,8 @@ create table if not exists public.shuttle_access (
   pin_hash   text not null,
   updated_at timestamptz not null default now()
 );
+-- Cifre del PIN (null = PIN creato prima del 19/10/2026, di 4 cifre): la reception vede l'avviso «PIN corto».
+alter table public.shuttle_access add column if not exists pin_digits smallint;
 
 -- Dispositivi collegati: utente (anonimo) di Supabase Auth che ha inserito un PIN valido.
 create table if not exists public.shuttle_staff (
@@ -339,8 +341,8 @@ begin
 end
 $$;
 
--- Hash del PIN dello staff (SHA-256 con sale casuale). Un PIN di 4 cifre resta indovinabile per
--- tentativi: per questo i tentativi sono limitati in shuttle_staff_login.
+-- Hash del PIN dello staff (SHA-256 con sale casuale). La tabella non è leggibile dall'app; contro i
+-- tentativi a ripetizione valgono i limiti di shuttle_staff_login e i PIN nuovi di 6–8 cifre.
 create or replace function public.shuttle_pin_hash(p_salt text, p_pin text)
 returns text
 language sql immutable
@@ -356,16 +358,21 @@ as $$
 declare
   salt text := replace(gen_random_uuid()::text, '-', '');
 begin
-  if p_role not in ('reception', 'autista') or coalesce(p_pin, '') !~ '^\d{4}$' then
-    raise exception 'non_valida:Il PIN deve avere 4 cifre.' using errcode = 'P0001';
+  if p_role not in ('reception', 'autista') or coalesce(p_pin, '') !~ '^\d{6,8}$' then
+    raise exception 'non_valida:Il PIN deve avere da 6 a 8 cifre.' using errcode = 'P0001';
+  end if;
+  -- Niente PIN banali: cifre tutte uguali o in fila (123456, 987654…). Stessa regola di staffPinProblem.
+  if p_pin ~ '^(\d)\1+$' or position(p_pin in '01234567890123') > 0 or position(p_pin in '98765432109876') > 0 then
+    raise exception 'non_valida:PIN troppo facile: evita cifre tutte uguali o in fila.' using errcode = 'P0001';
   end if;
   if exists (select 1 from public.shuttle_access a
               where a.role <> p_role and a.pin_hash = public.shuttle_pin_hash(a.pin_salt, p_pin)) then
     raise exception 'non_valida:Reception e autista devono avere PIN diversi.' using errcode = 'P0001';
   end if;
-  insert into public.shuttle_access (role, pin_salt, pin_hash, updated_at)
-  values (p_role, salt, public.shuttle_pin_hash(salt, p_pin), now())
-  on conflict (role) do update set pin_salt = excluded.pin_salt, pin_hash = excluded.pin_hash, updated_at = now();
+  insert into public.shuttle_access (role, pin_salt, pin_hash, pin_digits, updated_at)
+  values (p_role, salt, public.shuttle_pin_hash(salt, p_pin), char_length(p_pin), now())
+  on conflict (role) do update set pin_salt = excluded.pin_salt, pin_hash = excluded.pin_hash,
+                                   pin_digits = excluded.pin_digits, updated_at = now();
 end
 $$;
 
@@ -454,6 +461,9 @@ $$;
 
 -- Accesso con PIN su una sessione anonima di Supabase Auth: il PIN decide il ruolo.
 -- Restituisce {"role"} oppure {"error"} (niente eccezioni, così il tentativo fallito resta registrato).
+-- Limiti contro chi prova i PIN a ripetizione (anche cambiando dispositivo): 5 errori in 10 minuti per
+-- dispositivo, 20 in un'ora e 50 in 24 ore in tutto. Superati, nessun nuovo accesso finché i tentativi non
+-- scadono o la reception non li azzera (shuttle_clear_pin_failures); i dispositivi già collegati restano dentro.
 create or replace function public.shuttle_staff_login(p_pin text)
 returns json
 language plpgsql security definer
@@ -463,16 +473,23 @@ declare
   uid   uuid := auth.uid();
   r     text;
   mine  int;
-  total int;
+  hour  int;
+  day   int;
 begin
   if uid is null then
     return json_build_object('error', 'non_autorizzato');
   end if;
   delete from public.shuttle_pin_failures where at < now() - interval '1 day';
-  select count(*) into mine from public.shuttle_pin_failures where user_id = uid and at > now() - interval '10 minutes';
-  select count(*) into total from public.shuttle_pin_failures where at > now() - interval '10 minutes';
-  if mine >= 5 or total >= 30 then
+  select count(*) filter (where user_id = uid and at > now() - interval '10 minutes'),
+         count(*) filter (where at > now() - interval '1 hour'),
+         count(*)
+    into mine, hour, day
+    from public.shuttle_pin_failures;
+  if mine >= 5 then
     return json_build_object('error', 'troppi_tentativi');
+  end if;
+  if hour >= 20 or day >= 50 then
+    return json_build_object('error', 'accesso_bloccato');
   end if;
   select a.role into r from public.shuttle_access a
    where a.pin_hash = public.shuttle_pin_hash(a.pin_salt, trim(coalesce(p_pin, ''))) limit 1;
@@ -484,6 +501,41 @@ begin
   insert into public.shuttle_staff (user_id, role, created_at) values (uid, r, now())
   on conflict (user_id) do update set role = excluded.role, created_at = now();
   return json_build_object('role', r);
+end
+$$;
+
+-- Tentativi di PIN errati (solo reception): quanti nelle ultime 24 ore e se i nuovi accessi sono bloccati.
+create or replace function public.shuttle_pin_failures_info()
+returns json
+language plpgsql security definer
+set search_path = public, pg_temp
+as $$
+declare
+  hour int;
+  day  int;
+  last timestamptz;
+begin
+  perform public.shuttle_require_staff(array['reception']);
+  select count(*) filter (where at > now() - interval '1 hour'), count(*), max(at)
+    into hour, day, last
+    from public.shuttle_pin_failures where at > now() - interval '1 day';
+  return json_build_object('lastHour', hour, 'lastDay', day, 'lastAt', last, 'blocked', hour >= 20 or day >= 50);
+end
+$$;
+
+-- Solo reception: azzera i tentativi errati e sblocca i nuovi accessi. Restituisce quanti ne ha tolti.
+create or replace function public.shuttle_clear_pin_failures()
+returns int
+language plpgsql security definer
+set search_path = public, pg_temp
+as $$
+declare
+  n int;
+begin
+  perform public.shuttle_require_staff(array['reception']);
+  delete from public.shuttle_pin_failures;
+  get diagnostics n = row_count;
+  return n;
 end
 $$;
 
@@ -503,9 +555,12 @@ as $$
 begin
   perform public.shuttle_require_staff(array['reception']);
   return (
-    select json_agg(json_build_object('role', r.role, 'count', coalesce(c.n, 0), 'lastLoginAt', c.last) order by r.role desc)
+    select json_agg(json_build_object('role', r.role, 'count', coalesce(c.n, 0), 'lastLoginAt', c.last,
+                                      'pinDigits', coalesce(a.pin_digits, case when a.role is not null then 4 end))
+                    order by r.role desc)
       from (values ('reception'), ('autista')) r(role)
       left join (select role, count(*)::int n, max(created_at) last from public.shuttle_staff group by role) c on c.role = r.role
+      left join public.shuttle_access a on a.role = r.role
   );
 end
 $$;
@@ -825,7 +880,16 @@ begin
   end if;
 
   delete from public.shuttle_login_failures where room = rm;
+  -- Al massimo 10 accessi in 10 minuti per soggiorno e 20 telefoni collegati: oltre, si chiede di riprovare.
+  if (select count(*) from public.shuttle_guest_sessions
+       where stay_id = st.id and created_at > now() - interval '10 minutes') >= 10 then
+    return json_build_object('error', 'troppi_tentativi');
+  end if;
   delete from public.shuttle_guest_sessions where last_seen_at < now() - interval '30 days';
+  delete from public.shuttle_guest_sessions
+   where stay_id = st.id
+     and token not in (select token from public.shuttle_guest_sessions where stay_id = st.id
+                        order by last_seen_at desc limit 19);
   insert into public.shuttle_guest_sessions (stay_id) values (st.id) returning token into tok;
   return json_build_object('token', tok, 'stay_id', st.id, 'room', st.room,
                            'persons', st.persons, 'valid_until', st.valid_until);
@@ -932,6 +996,13 @@ begin
   if cardinality(probs) > 0 then
     raise exception 'non_valida:%', array_to_string(probs, ',') using errcode = 'P0001';
   end if;
+  -- Contro le prenotazioni a raffica: al massimo 4 corse aperte per camera nello stesso giorno
+  -- (andata e ritorno due volte). Oltre, solo la reception (MAX_GUEST_OPEN_RIDES_PER_DAY in rules.ts).
+  if (select count(*) from public.shuttle_rides
+       where stay_id = st.id and service_date = p_date
+         and status in ('richiesta', 'confermata', 'sul_posto')) >= 4 then
+    raise exception 'non_valida:troppe_corse' using errcode = 'P0001';
+  end if;
   -- Un ospite alla volta per giorno: due prenotazioni contemporanee non possono superare il controllo insieme.
   perform pg_advisory_xact_lock(hashtext('shuttle_trip_' || p_date::text));
   trip := public.shuttle_trip_problem(p_date, p_time, p_direction, p_destination, p_persons);
@@ -983,6 +1054,7 @@ declare
   staff_fns text[] := array['shuttle_role', 'shuttle_save_settings', 'shuttle_enable_room', 'shuttle_sync_rooms',
                             'shuttle_revoke_stay', 'shuttle_staff_login', 'shuttle_staff_logout', 'shuttle_set_pin',
                             'shuttle_staff_devices', 'shuttle_disconnect',
+                            'shuttle_pin_failures_info', 'shuttle_clear_pin_failures',
                             'shuttle_reception_create_ride', 'shuttle_cancel_ride', 'shuttle_set_charge',
                             'shuttle_driver_message', 'shuttle_driver_done', 'shuttle_driver_no_show'];
 begin

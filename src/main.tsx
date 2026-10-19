@@ -12,7 +12,19 @@ import { AppProvider } from './ui/kit';
 const env = readEnv();
 const el = document.getElementById('root');
 
-if (el && (!env.supabaseUrl || !env.supabaseAnonKey)) {
+// Lo shuttle non si apre dentro pagine altrui (iframe): nessuno può nascondere i pulsanti sotto un'altra grafica.
+const framed = (() => {
+  try {
+    return window.top !== window.self;
+  } catch {
+    return true;
+  }
+})();
+
+if (el && framed) {
+  el.innerHTML =
+    '<main style="padding:24px;font-family:Lato,system-ui,sans-serif"><h1>Shuttle Hartmann</h1><p>Per sicurezza la pagina si apre solo in una finestra a sé: <a href="https://alpstay.github.io/ShuttleHartmann/" target="_top" rel="noopener">apri lo shuttle</a>.</p></main>';
+} else if (el && (!env.supabaseUrl || !env.supabaseAnonKey)) {
   el.innerHTML =
     '<main style="padding:24px;font-family:Lato,system-ui,sans-serif"><h1>Configurazione mancante</h1><p>Imposta VITE_SUPABASE_URL e VITE_SUPABASE_ANON_KEY nel file .env e ricostruisci (npm run build).</p></main>';
 } else if (el) {

@@ -243,6 +243,7 @@ export class ShuttleError extends Error {
       | 'pin_errato'
       | 'camera_non_attiva'
       | 'troppi_tentativi'
+      | 'accesso_bloccato'
       | 'sessione_scaduta'
       | 'non_valida'
       | 'stato_non_valido'

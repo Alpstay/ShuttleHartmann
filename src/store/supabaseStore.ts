@@ -20,7 +20,7 @@ import type {
   StaySource,
 } from '../domain/types';
 import { ShuttleError } from '../domain/types';
-import type { GuestApi, ShuttleBackend, StaffApi, StaffAuth, StaffDevices, StaffRole, StaffUser } from './ShuttleStore';
+import type { GuestApi, PinFailuresInfo, ShuttleBackend, StaffApi, StaffAuth, StaffDevices, StaffRole, StaffUser } from './ShuttleStore';
 
 // ---------------------------------------------------------------------------
 // Righe del database (snake_case) e conversione verso il modello dell'app
@@ -161,6 +161,10 @@ function settingsFromRow(s: SettingsRow): ShuttleSettings {
   };
 }
 
+/** Nuovi accessi dello staff sospesi per troppi PIN errati in tutto (vedi shuttle_staff_login). */
+export const STAFF_BLOCKED_MESSAGE =
+  'Accesso staff sospeso per sicurezza: troppi PIN errati. Riprova più tardi oppure fatti sbloccare da un dispositivo della reception già collegato (Impostazioni → Accessi).';
+
 /** Traduce gli errori sollevati dalle funzioni SQL (es. «non_valida:troppo_presto») in ShuttleError. */
 function toShuttleError(e: { message?: string } | null | undefined): ShuttleError {
   const msg = e?.message ?? 'rete';
@@ -169,6 +173,7 @@ function toShuttleError(e: { message?: string } | null | undefined): ShuttleErro
     case 'pin_errato':
     case 'camera_non_attiva':
     case 'troppi_tentativi':
+    case 'accesso_bloccato':
     case 'sessione_scaduta':
     case 'stato_non_valido':
     case 'attesa_in_corso':
@@ -231,8 +236,9 @@ export function createSupabaseBackend(url: string, anonKey: string): ShuttleBack
         const { error } = await client.auth.signInAnonymously();
         if (error) throw anonymousSignInError(error);
       }
-      const res = await rpc<{ role?: StaffRole; error?: 'pin_errato' | 'troppi_tentativi' | 'non_autorizzato' }>(client, 'shuttle_staff_login', { p_pin: pin });
+      const res = await rpc<{ role?: StaffRole; error?: 'pin_errato' | 'troppi_tentativi' | 'accesso_bloccato' | 'non_autorizzato' }>(client, 'shuttle_staff_login', { p_pin: pin });
       if (res.error === 'troppi_tentativi') throw new ShuttleError('troppi_tentativi', 'Troppi tentativi: riprova tra 10 minuti.');
+      if (res.error === 'accesso_bloccato') throw new ShuttleError('accesso_bloccato', STAFF_BLOCKED_MESSAGE);
       if (res.error || !res.role) throw new ShuttleError('pin_errato', 'PIN non corretto.');
       const user = await staffUser();
       if (!user) throw new ShuttleError('non_autorizzato', 'Accesso non riuscito: riprova.');
@@ -352,6 +358,8 @@ export function createSupabaseBackend(url: string, anonKey: string): ShuttleBack
     },
     devices: async () => rpc<StaffDevices[]>(client, 'shuttle_staff_devices', {}),
     disconnect: async (role) => rpc<number>(client, 'shuttle_disconnect', { p_role: role }),
+    pinFailures: async () => rpc<PinFailuresInfo>(client, 'shuttle_pin_failures_info', {}),
+    clearPinFailures: async () => rpc<number>(client, 'shuttle_clear_pin_failures', {}),
     async syncRooms(items, complete) {
       await rpc<null>(client, 'shuttle_sync_rooms', { p_items: items, p_complete: complete });
     },

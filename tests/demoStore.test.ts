@@ -17,11 +17,11 @@ describe('accessi con PIN e numero di camera (backend demo)', () => {
     await expect(rec.auth.signInWithPin('0000')).rejects.toMatchObject({ code: 'pin_errato' });
     expect((await rec.auth.signInWithPin(PINS.reception)).role).toBe('reception');
     expect((await drv.auth.signInWithPin(PINS.autista)).role).toBe('autista');
-    await expect(drv.staff.setPin('autista', '1357')).rejects.toMatchObject({ code: 'non_autorizzato' });
+    await expect(drv.staff.setPin('autista', '135792')).rejects.toMatchObject({ code: 'non_autorizzato' });
     await expect(rec.staff.setPin('autista', PINS.reception)).rejects.toMatchObject({ code: 'non_valida' });
-    await rec.staff.setPin('autista', '1357');
+    await rec.staff.setPin('autista', '135792');
     expect(await drv.auth.current()).toBeNull();
-    expect((await drv.auth.signInWithPin('1357')).role).toBe('autista');
+    expect((await drv.auth.signInWithPin('135792')).role).toBe('autista');
     expect((await rec.staff.devices()).find((d) => d.role === 'autista')?.count).toBe(1);
     expect(await rec.staff.disconnect('autista')).toBe(1);
     expect(await drv.auth.current()).toBeNull();
