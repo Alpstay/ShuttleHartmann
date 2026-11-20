@@ -1,1 +1,1 @@
-2026-11-20 17:53 non pubblicato · passo 4 · ERRORE: nessuna prenotazione nei file (La Scatola: 0 righe in casa/partenze/ospiti/intestatari Hartmann per 2026-11-20 e 2026-11-21, dati fresh 16:45 UTC)
+2026-11-20 18:51 non pubblicato · passo 4 · ERRORE: nessuna prenotazione nei file (La Scatola: 0 righe in casa/partenze/ospiti/intestatari Hartmann per 2026-11-20 e 2026-11-21, dati fresh 17:45 UTC)
