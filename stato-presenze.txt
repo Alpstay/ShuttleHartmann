@@ -1,1 +1,1 @@
-2026-11-23 11:51 non pubblicato · passo 4 · presenze.mjs ERRORE: nessuna prenotazione nei file (La Scatola ha risposto con dati freschi, sync 11:45, ma 0 righe e 0 ospiti registrati per l'Hartmann il 2026-11-23 e 2026-11-24)
+2026-11-23 12:51 non pubblicato · passo 4 · presenze.mjs ERRORE: nessuna prenotazione nei file (La Scatola ha risposto con dati freschi, sync 12:45, ma 0 righe in casa/partenze e 0 ospiti registrati/intestatari per l'Hartmann il 2026-11-23 e 2026-11-24)
