@@ -8,7 +8,7 @@ Tre indirizzi distinti (ognuno con il suo titolo, comodo come icona sulla scherm
 | --- | --- | --- | --- |
 | Ospite | `…/ShuttleHartmann/ospite` (o QR della camera `#/ospite/105`) | ospiti in casa | numero di camera |
 | Reception | `…/ShuttleHartmann/reception` | banco reception | solo PIN reception |
-| Autista | `…/ShuttleHartmann/autista` | telefono sul mezzo | solo PIN autista |
+| Autista | `…/ShuttleHartmann/autista` | telefono sul mezzo | PIN del singolo autista (fino a 3 autisti) |
 
 Gli indirizzi brevi sono cartelle con una pagina che rimanda a `#/ospite`, `#/reception` e `#/autista`.
 Su un indirizzo dello staff il PIN dell'altra area non apre nulla: la pagina indica l'indirizzo giusto.
@@ -87,13 +87,16 @@ GitHub Pages  index.html ◀── reception (password presenze, rilettura ogni 
 
 ## Sicurezza
 
-- **PIN dello staff**: i PIN nuovi hanno da 6 a 8 cifre, non in fila e non tutte uguali (controllo anche sul
-  server). I PIN di 4 cifre già impostati funzionano finché non si cambiano; in *Impostazioni → Accessi*
-  compare «PIN corto». Il PIN si conferma con *Entra* (nessun invio automatico, non si svela la lunghezza).
+- **PIN dello staff** (dal 23/11/2026, scelta della reception): 4 cifre. Un PIN per la reception e uno per
+  ogni autista (Autista 1, 2, 3), tutti diversi tra loro: il PIN dice chi entra. Il server rifiuta PIN di
+  lunghezza diversa o già usati da un altro. Con 4 cifre la protezione sono i limiti ai tentativi qui sotto:
+  conviene evitare PIN come 1111 o 1234, che sono i primi che un estraneo prova.
+  *Da completare nella pagina*: *Impostazioni → Accessi* mostra ancora un solo autista e chiede 6–8 cifre
+  (versione della pagina del 19/10); finché non si aggiorna, i PIN si impostano dall'SQL Editor (sotto).
 - **Tentativi**: 5 PIN errati in 10 minuti bloccano quel dispositivo; 20 errori in un'ora o 50 in 24 ore, da
   qualunque dispositivo, sospendono tutti i nuovi accessi dello staff (chi è già collegato resta dentro).
   La reception vede i tentativi in *Impostazioni → Accessi → PIN errati* e in lista, se sono molti, e può
-  sbloccare con *Sblocca gli accessi*. Con un PIN di 6 cifre indovinarlo richiederebbe decine di anni.
+  sbloccare con *Sblocca gli accessi*.
 - **Area ospite** (si entra con il numero di camera, per scelta): al massimo 4 corse aperte per camera nello
   stesso giorno (oltre, solo la reception), 10 accessi in 10 minuti e 20 telefoni collegati per soggiorno.
 - **Pagina**: Content-Security-Policy nella pagina di produzione (parla solo con sé stessa e con il progetto
@@ -106,10 +109,12 @@ GitHub Pages  index.html ◀── reception (password presenze, rilettura ogni 
 ## Messa in produzione
 
 1. **Supabase** (progetto nuovo, regione UE): SQL Editor → incolla ed esegui `supabase/schema.sql`.
-   Poi, sempre nell'SQL Editor, imposta i PIN iniziali di 6–8 cifre (scrivili solo lì, mai in un file del
-   repository):
-   `select public.shuttle_admin_set_pin('reception', '<PIN reception>');` e
-   `select public.shuttle_admin_set_pin('autista', '<PIN autista>');`.
+   Poi, sempre nell'SQL Editor, imposta i PIN di 4 cifre, tutti diversi (scrivili solo lì, mai in un file del
+   repository): `select public.shuttle_admin_set_pin('reception', '<PIN reception>');` e, per ogni autista,
+   `select public.shuttle_admin_set_pin('autista', '<PIN>', 1);` (poi `, 2` e `, 3` per il secondo e il terzo).
+   Impostare un PIN scollega i dispositivi entrati con quello precedente. Togliere l'Autista 3:
+   `delete from public.shuttle_access where role = 'autista' and slot = 3;` e
+   `delete from public.shuttle_staff where role = 'autista' and slot = 3;`.
    In *Authentication → Sign In / Providers* attiva **Allow new users to sign up** e **Allow anonymous sign-ins**
    (l'accesso anonimo conta come iscrizione) e disattiva il provider **Email**, che lo shuttle non usa.
 2. **Repository** `Alpstay/ShuttleHartmann` (pubblico, come WelcomeHartmann) con GitHub Pages su `main`, radice.
@@ -124,8 +129,8 @@ GitHub Pages  index.html ◀── reception (password presenze, rilettura ogni 
 
 ## Programma Impostazioni (reception)
 
-- **Accessi**: cambio PIN reception e autista (6–8 cifre, diversi tra loro; cambiarne uno scollega gli altri
-  dispositivi di quel ruolo), PIN errati delle ultime 24 ore con *Azzera* / *Sblocca gli accessi*,
+- **Accessi**: cambio PIN reception e autista (cambiarne uno scollega gli altri dispositivi di quel ruolo;
+  regole e autisti multipli: vedi *Sicurezza*), PIN errati delle ultime 24 ore con *Azzera* / *Sblocca gli accessi*,
   dispositivi collegati per ruolo con «Scollega», ingresso ospiti
   («solo camere con ospiti in casa» oppure «tutte le camere dell'elenco» se le presenze non arrivano).
 - **Camere**: elenco delle camere (numero come in Slope), aggiungi o togli.

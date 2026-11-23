@@ -59,22 +59,43 @@ values (1, '[
 ]'::jsonb)
 on conflict (id) do nothing;
 
--- PIN di reception e autista, salvati solo come hash con sale.
+-- PIN dello staff, salvati solo come hash con sale: uno per la reception e uno per ogni autista
+-- (slot 1–3: «Autista 1», «Autista 2», «Autista 3»). Tutti di 4 cifre e tutti diversi tra loro.
 create table if not exists public.shuttle_access (
-  role       text primary key check (role in ('reception', 'autista')),
+  role       text not null check (role in ('reception', 'autista')),
+  slot       smallint not null default 1,
   pin_salt   text not null,
   pin_hash   text not null,
-  updated_at timestamptz not null default now()
+  updated_at timestamptz not null default now(),
+  primary key (role, slot)
 );
--- Cifre del PIN (null = PIN creato prima del 19/10/2026, di 4 cifre): la reception vede l'avviso «PIN corto».
 alter table public.shuttle_access add column if not exists pin_digits smallint;
+-- Database creato prima del 23/11/2026: un solo PIN per ruolo. Si aggiunge lo slot (il PIN autista
+-- esistente diventa «Autista 1») e la chiave passa da (role) a (role, slot).
+alter table public.shuttle_access add column if not exists slot smallint not null default 1;
+do $$
+begin
+  if exists (select 1 from pg_constraint c
+              where c.conrelid = 'public.shuttle_access'::regclass and c.contype = 'p'
+                and array_length(c.conkey, 1) = 1) then
+    alter table public.shuttle_access drop constraint shuttle_access_pkey;
+    alter table public.shuttle_access add primary key (role, slot);
+  end if;
+end
+$$;
+alter table public.shuttle_access drop constraint if exists shuttle_access_slot_check;
+alter table public.shuttle_access add constraint shuttle_access_slot_check
+  check ((role = 'reception' and slot = 1) or (role = 'autista' and slot between 1 and 3));
 
 -- Dispositivi collegati: utente (anonimo) di Supabase Auth che ha inserito un PIN valido.
+-- slot = quale autista (1–3); per la reception sempre 1.
 create table if not exists public.shuttle_staff (
   user_id    uuid primary key references auth.users (id) on delete cascade,
   role       text not null check (role in ('reception', 'autista')),
+  slot       smallint not null default 1,
   created_at timestamptz not null default now()
 );
+alter table public.shuttle_staff add column if not exists slot smallint not null default 1;
 
 create table if not exists public.shuttle_pin_failures (
   id      bigint generated always as identity primary key,
@@ -341,8 +362,9 @@ begin
 end
 $$;
 
--- Hash del PIN dello staff (SHA-256 con sale casuale). La tabella non è leggibile dall'app; contro i
--- tentativi a ripetizione valgono i limiti di shuttle_staff_login e i PIN nuovi di 6–8 cifre.
+-- Hash del PIN dello staff (SHA-256 con sale casuale). La tabella non è leggibile dall'app. I PIN hanno
+-- 4 cifre (scelta della reception, 23/11/2026): contro i tentativi a ripetizione valgono i limiti di
+-- shuttle_staff_login (blocco per dispositivo e blocco generale con sblocco dalla reception).
 create or replace function public.shuttle_pin_hash(p_salt text, p_pin text)
 returns text
 language sql immutable
@@ -350,7 +372,14 @@ as $$
   select encode(sha256(convert_to(p_salt || ':' || p_pin, 'UTF8')), 'hex')
 $$;
 
-create or replace function public.shuttle_store_pin(p_role text, p_pin text)
+-- Le versioni con un solo PIN per ruolo avevano firme senza slot: si tolgono, altrimenti le chiamate
+-- con due argomenti sarebbero ambigue.
+drop function if exists public.shuttle_store_pin(text, text);
+drop function if exists public.shuttle_admin_set_pin(text, text);
+drop function if exists public.shuttle_set_pin(text, text);
+drop function if exists public.shuttle_disconnect(text);
+
+create or replace function public.shuttle_store_pin(p_role text, p_pin text, p_slot int default 1)
 returns void
 language plpgsql volatile
 set search_path = public, pg_temp
@@ -358,21 +387,22 @@ as $$
 declare
   salt text := replace(gen_random_uuid()::text, '-', '');
 begin
-  if p_role not in ('reception', 'autista') or coalesce(p_pin, '') !~ '^\d{6,8}$' then
-    raise exception 'non_valida:Il PIN deve avere da 6 a 8 cifre.' using errcode = 'P0001';
+  if p_role not in ('reception', 'autista') or coalesce(p_pin, '') !~ '^\d{4}$' then
+    raise exception 'non_valida:Il PIN deve avere 4 cifre.' using errcode = 'P0001';
   end if;
-  -- Niente PIN banali: cifre tutte uguali o in fila (123456, 987654…). Stessa regola di staffPinProblem.
-  if p_pin ~ '^(\d)\1+$' or position(p_pin in '01234567890123') > 0 or position(p_pin in '98765432109876') > 0 then
-    raise exception 'non_valida:PIN troppo facile: evita cifre tutte uguali o in fila.' using errcode = 'P0001';
+  if (p_role = 'reception' and p_slot is distinct from 1) or (p_role = 'autista' and coalesce(p_slot, 0) not between 1 and 3) then
+    raise exception 'non_valida:Gli autisti sono tre: Autista 1, 2 o 3.' using errcode = 'P0001';
   end if;
+  -- Il PIN decide chi entra: deve essere diverso da quello della reception e da quello degli altri autisti.
   if exists (select 1 from public.shuttle_access a
-              where a.role <> p_role and a.pin_hash = public.shuttle_pin_hash(a.pin_salt, p_pin)) then
-    raise exception 'non_valida:Reception e autista devono avere PIN diversi.' using errcode = 'P0001';
+              where not (a.role = p_role and a.slot = p_slot)
+                and a.pin_hash = public.shuttle_pin_hash(a.pin_salt, p_pin)) then
+    raise exception 'non_valida:Ogni PIN deve essere diverso: reception e ogni autista hanno il proprio.' using errcode = 'P0001';
   end if;
-  insert into public.shuttle_access (role, pin_salt, pin_hash, pin_digits, updated_at)
-  values (p_role, salt, public.shuttle_pin_hash(salt, p_pin), char_length(p_pin), now())
-  on conflict (role) do update set pin_salt = excluded.pin_salt, pin_hash = excluded.pin_hash,
-                                   pin_digits = excluded.pin_digits, updated_at = now();
+  insert into public.shuttle_access (role, slot, pin_salt, pin_hash, pin_digits, updated_at)
+  values (p_role, p_slot, salt, public.shuttle_pin_hash(salt, p_pin), 4, now())
+  on conflict (role, slot) do update set pin_salt = excluded.pin_salt, pin_hash = excluded.pin_hash,
+                                         pin_digits = excluded.pin_digits, updated_at = now();
 end
 $$;
 
@@ -433,34 +463,51 @@ begin
 end
 $$;
 
--- PIN dello staff: da cambiare solo dalla reception (il PIN iniziale si imposta dall'SQL Editor
--- con shuttle_admin_set_pin, che non è esposta all'app). Cambiare un PIN scollega gli altri
--- dispositivi di quel ruolo.
-create or replace function public.shuttle_admin_set_pin(p_role text, p_pin text)
+-- PIN dello staff: da cambiare solo dalla reception (i PIN si impostano anche dall'SQL Editor con
+-- shuttle_admin_set_pin, che non è esposta all'app). p_slot: per gli autisti 1, 2 o 3.
+-- Impostare un PIN scollega i dispositivi entrati con il PIN precedente (di quel ruolo e slot).
+create or replace function public.shuttle_admin_set_pin(p_role text, p_pin text, p_slot int default 1)
 returns void
 language plpgsql security definer
 set search_path = public, pg_temp
 as $$
 begin
-  perform public.shuttle_store_pin(p_role, p_pin);
-  delete from public.shuttle_staff where role = p_role;
+  perform public.shuttle_store_pin(p_role, p_pin, p_slot);
+  delete from public.shuttle_staff where role = p_role and slot = p_slot;
 end
 $$;
 
-create or replace function public.shuttle_set_pin(p_role text, p_pin text)
+create or replace function public.shuttle_set_pin(p_role text, p_pin text, p_slot int default 1)
 returns void
 language plpgsql security definer
 set search_path = public, pg_temp
 as $$
 begin
   perform public.shuttle_require_staff(array['reception']);
-  perform public.shuttle_store_pin(p_role, p_pin);
-  delete from public.shuttle_staff where role = p_role and user_id <> auth.uid();
+  perform public.shuttle_store_pin(p_role, p_pin, p_slot);
+  delete from public.shuttle_staff where role = p_role and slot = p_slot and user_id <> auth.uid();
 end
 $$;
 
--- Accesso con PIN su una sessione anonima di Supabase Auth: il PIN decide il ruolo.
--- Restituisce {"role"} oppure {"error"} (niente eccezioni, così il tentativo fallito resta registrato).
+-- Solo reception: toglie il PIN dell'Autista 2 o 3 (chi non lavora più) e scollega i suoi dispositivi.
+-- L'Autista 1 resta sempre, così il mezzo ha almeno un PIN.
+create or replace function public.shuttle_remove_pin(p_slot int)
+returns void
+language plpgsql security definer
+set search_path = public, pg_temp
+as $$
+begin
+  perform public.shuttle_require_staff(array['reception']);
+  if coalesce(p_slot, 0) not between 2 and 3 then
+    raise exception 'non_valida:Si può togliere solo il PIN dell’Autista 2 o 3.' using errcode = 'P0001';
+  end if;
+  delete from public.shuttle_access where role = 'autista' and slot = p_slot;
+  delete from public.shuttle_staff where role = 'autista' and slot = p_slot;
+end
+$$;
+
+-- Accesso con PIN su una sessione anonima di Supabase Auth: il PIN decide il ruolo e quale autista.
+-- Restituisce {"role", "slot"} oppure {"error"} (niente eccezioni, così il tentativo fallito resta registrato).
 -- Limiti contro chi prova i PIN a ripetizione (anche cambiando dispositivo): 5 errori in 10 minuti per
 -- dispositivo, 20 in un'ora e 50 in 24 ore in tutto. Superati, nessun nuovo accesso finché i tentativi non
 -- scadono o la reception non li azzera (shuttle_clear_pin_failures); i dispositivi già collegati restano dentro.
@@ -472,6 +519,7 @@ as $$
 declare
   uid   uuid := auth.uid();
   r     text;
+  s     smallint;
   mine  int;
   hour  int;
   day   int;
@@ -491,16 +539,16 @@ begin
   if hour >= 20 or day >= 50 then
     return json_build_object('error', 'accesso_bloccato');
   end if;
-  select a.role into r from public.shuttle_access a
+  select a.role, a.slot into r, s from public.shuttle_access a
    where a.pin_hash = public.shuttle_pin_hash(a.pin_salt, trim(coalesce(p_pin, ''))) limit 1;
   if r is null then
     insert into public.shuttle_pin_failures (user_id) values (uid);
     return json_build_object('error', 'pin_errato');
   end if;
   delete from public.shuttle_pin_failures where user_id = uid;
-  insert into public.shuttle_staff (user_id, role, created_at) values (uid, r, now())
-  on conflict (user_id) do update set role = excluded.role, created_at = now();
-  return json_build_object('role', r);
+  insert into public.shuttle_staff (user_id, role, slot, created_at) values (uid, r, s, now())
+  on conflict (user_id) do update set role = excluded.role, slot = excluded.slot, created_at = now();
+  return json_build_object('role', r, 'slot', s);
 end
 $$;
 
@@ -554,18 +602,27 @@ set search_path = public, pg_temp
 as $$
 begin
   perform public.shuttle_require_staff(array['reception']);
+  -- Un elemento per ruolo (totale dei dispositivi) con il dettaglio per slot: reception 1, autisti 1–3.
+  -- pinDigits resta null: tutti i PIN hanno 4 cifre (campo delle versioni precedenti della pagina).
   return (
-    select json_agg(json_build_object('role', r.role, 'count', coalesce(c.n, 0), 'lastLoginAt', c.last,
-                                      'pinDigits', coalesce(a.pin_digits, case when a.role is not null then 4 end))
-                    order by r.role desc)
+    select json_agg(json_build_object(
+             'role', r.role, 'count', coalesce(c.n, 0), 'lastLoginAt', c.last, 'pinDigits', null,
+             'slots', (select json_agg(json_build_object('slot', g.slot, 'pinSet', a.role is not null,
+                                                         'count', coalesce(cs.n, 0), 'lastLoginAt', cs.last)
+                                       order by g.slot)
+                         from generate_series(1, case when r.role = 'autista' then 3 else 1 end) g(slot)
+                         left join public.shuttle_access a on a.role = r.role and a.slot = g.slot
+                         left join (select slot, count(*)::int n, max(created_at) last from public.shuttle_staff
+                                     where role = r.role group by slot) cs on cs.slot = g.slot))
+           order by r.role desc)
       from (values ('reception'), ('autista')) r(role)
       left join (select role, count(*)::int n, max(created_at) last from public.shuttle_staff group by role) c on c.role = r.role
-      left join public.shuttle_access a on a.role = r.role
   );
 end
 $$;
 
-create or replace function public.shuttle_disconnect(p_role text)
+-- Solo reception: scollega i dispositivi di un ruolo (con p_slot, solo quelli di quell'autista).
+create or replace function public.shuttle_disconnect(p_role text, p_slot int default null)
 returns int
 language plpgsql security definer
 set search_path = public, pg_temp
@@ -574,7 +631,8 @@ declare
   n int;
 begin
   perform public.shuttle_require_staff(array['reception']);
-  delete from public.shuttle_staff where role = p_role and user_id <> auth.uid();
+  delete from public.shuttle_staff
+   where role = p_role and (p_slot is null or slot = p_slot) and user_id <> auth.uid();
   get diagnostics n = row_count;
   return n;
 end
@@ -1053,7 +1111,7 @@ declare
                             'shuttle_guest_busy', 'shuttle_guest_create_ride', 'shuttle_guest_cancel_ride'];
   staff_fns text[] := array['shuttle_role', 'shuttle_save_settings', 'shuttle_enable_room', 'shuttle_sync_rooms',
                             'shuttle_revoke_stay', 'shuttle_staff_login', 'shuttle_staff_logout', 'shuttle_set_pin',
-                            'shuttle_staff_devices', 'shuttle_disconnect',
+                            'shuttle_staff_devices', 'shuttle_disconnect', 'shuttle_remove_pin',
                             'shuttle_pin_failures_info', 'shuttle_clear_pin_failures',
                             'shuttle_reception_create_ride', 'shuttle_cancel_ride', 'shuttle_set_charge',
                             'shuttle_driver_message', 'shuttle_driver_done', 'shuttle_driver_no_show'];
@@ -1095,9 +1153,14 @@ end
 $$;
 
 -- ---------------------------------------------------------------------------
--- PIN iniziali (una volta sola, dall'SQL Editor; non salvare i PIN in nessun file del repository):
+-- PIN (4 cifre, tutti diversi) dall'SQL Editor; non salvare i PIN in nessun file del repository:
 --   select public.shuttle_admin_set_pin('reception', '<PIN reception>');
---   select public.shuttle_admin_set_pin('autista',   '<PIN autista>');
+--   select public.shuttle_admin_set_pin('autista',   '<PIN autista 1>', 1);
+--   select public.shuttle_admin_set_pin('autista',   '<PIN autista 2>', 2);   -- facoltativo
+--   select public.shuttle_admin_set_pin('autista',   '<PIN autista 3>', 3);   -- facoltativo
+-- Togliere un autista (e scollegare i suoi dispositivi):
+--   delete from public.shuttle_access where role = 'autista' and slot = 3;
+--   delete from public.shuttle_staff  where role = 'autista' and slot = 3;
 -- Poi in Authentication → Sign In / Providers attivare «Allow anonymous sign-ins».
--- Da lì in avanti i PIN si cambiano dalla reception: Impostazioni → Accessi.
+-- I PIN si cambiano anche dalla reception: Impostazioni → Accessi.
 -- ---------------------------------------------------------------------------
